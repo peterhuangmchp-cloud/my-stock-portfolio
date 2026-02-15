@@ -48,6 +48,11 @@ def get_exchange_rate():
 usd_to_twd = get_exchange_rate()
 st.sidebar.metric("當前匯率 (USD/TWD)", f"{usd_to_twd:.2f}")
 
+# 定義顏色函數：數值小於 0 顯示紅色，其餘預設
+def color_negative_red(val):
+    color = 'red' if val < 0 else None
+    return f'color: {color}'
+
 try:
     df = load_data(gsheet_id)
     unique_symbols = df['symbol'].unique()
@@ -85,26 +90,24 @@ try:
             net_div_twd = total_div_raw
         
         yield_rate = (div_per_share / curr_price * 100) if curr_price > 0 else 0
-        
-        # 新增：計算距離 52 週高點跌幅 %
         drop_from_high = ((curr_price - h52) / h52 * 100) if h52 > 0 else 0
         
         return pd.Series([curr_price, mv_twd, profit_twd, roi, net_div_twd, yield_rate, h52, l52, drop_from_high])
 
     df[['current_price', 'mv_twd', 'profit_twd', 'roi', 'net_div_twd', 'yield_rate', 'h52', 'l52', 'drop_from_high']] = df.apply(process_row, axis=1)
 
-    # A. 摘要區 (維持原格式)
+    # A. 摘要區
     m1, m2, m3 = st.columns(3)
     m1.metric("總資產市值 (TWD)", f"${df['mv_twd'].sum():,.0f}")
     m2.metric("總累計損益 (TWD)", f"${df['profit_twd'].sum():,.0f}", f"{(df['profit_twd'].sum()/df['mv_twd'].sum()*100):.2f}%")
     m3.metric("年度預估稅後配息 (TWD)", f"${df['net_div_twd'].sum():,.0f}")
 
-    # B. 配息表 (維持原格式)
+    # B. 配息表
     st.markdown("---")
     st.subheader("💰 年度個股配息統計 (NTD)")
     st.dataframe(df[df['net_div_twd'] > 0][['name', 'symbol', 'shares', 'yield_rate', 'net_div_twd']].sort_values('net_div_twd', ascending=False).style.format({'yield_rate': '{:.2f}%', 'net_div_twd': '{:,.0f}'}), use_container_width=True)
 
-    # C. 持倉圖表 (維持原格式)
+    # C. 持倉圖表
     c1, c2 = st.columns(2)
     with c1:
         st.subheader("📌 資產配置比例")
@@ -113,20 +116,21 @@ try:
         st.subheader("📈 個股損益排行 (TWD)")
         st.plotly_chart(px.bar(df.sort_values('profit_twd'), x='profit_twd', y='name', orientation='h', color='profit_twd', color_continuous_scale='RdYlGn'), use_container_width=True)
 
-    # D. 原始持倉清單 (維持原格式)
+    # D. 原始持倉清單 (新增 ROI 紅字效果)
     st.subheader("📝 完整持倉清單")
-    st.dataframe(df[['name', 'symbol', 'shares', 'cost', 'current_price', 'profit_twd', 'roi']].style.format({'current_price': '{:.2f}', 'profit_twd': '{:,.0f}', 'roi': '{:.2f}%'}), use_container_width=True)
+    st.dataframe(df[['name', 'symbol', 'shares', 'cost', 'current_price', 'profit_twd', 'roi']].style.format({
+        'current_price': '{:.2f}', 'profit_twd': '{:,.0f}', 'roi': '{:.2f}%'
+    }).applymap(color_negative_red, subset=['roi']), use_container_width=True)
 
-    # --- [✨ 新功能：52 週高低點監控表] ---
+    # E. 52 週高低點監控表 (距高點跌幅全標紅)
     st.markdown("---")
     st.subheader("📉 52 週高低點風險監控 (USD/Local)")
     risk_df = df[['name', 'symbol', 'current_price', 'h52', 'l52', 'drop_from_high']].copy()
     risk_df.columns = ['名稱', '代號', '目前現價', '52週最高', '52週最低', '較高點跌幅 %']
     
-    # 使用 Style 讓跌幅變紅色更醒目
     st.dataframe(risk_df.style.format({
         '目前現價': '{:.2f}', '52週最高': '{:.2f}', '52週最低': '{:.2f}', '較高點跌幅 %': '{:.2f}%'
-    }).highlight_min(subset=['較高點跌幅 %'], color='#ffcccc'), use_container_width=True)
+    }).applymap(lambda x: 'color: red', subset=['較高點跌幅 %']), use_container_width=True)
 
 except Exception as e:
     st.error(f"系統錯誤: {e}")
