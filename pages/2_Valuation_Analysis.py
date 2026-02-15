@@ -7,7 +7,7 @@ if "authenticated" not in st.session_state or not st.session_state["authenticate
     st.warning("🔒 請先在主頁面輸入密碼解鎖。")
     st.stop()
 
-st.title("📈 個股估值與獲利分析 (Fundamental Analysis)")
+st.title("📈 個股估值與獲利分析")
 
 gsheet_id = st.secrets.get("GSHEET_ID")
 
@@ -17,68 +17,62 @@ def load_symbols():
 
 try:
     symbols = load_symbols()
-    # 過濾掉債券標的
     bond_list = ['TLT', 'SHV', 'SGOV', 'LQD']
     stock_options = [s for s in symbols if s not in bond_list]
-    
     sel_stock = st.selectbox("選擇分析標的：", stock_options)
     
-    with st.spinner('從 yfinance 提取財務指標中...'):
+    with st.spinner('提取數據中...'):
         tk = yf.Ticker(sel_stock)
         info = tk.info
         
-        # 提取核心指標
-        pe_trailing = info.get('trailingPE', 0)
-        pe_forward = info.get('forwardPE', 0)
-        eps_trailing = info.get('trailingEps', 0)  # 通常為 GAAP
-        
-        # 獲取 GAAP vs Non-GAAP (從分析師預期或財務報表特徵中提取)
-        # Note: yfinance 對 Non-GAAP 的標註較分散，通常用 "Earnings from continuing operations" 比較
-        financials = tk.get_income_stmt()
-        
-        # --- A. 估值概覽面板 ---
+        # A. 估值概覽 (修正讀取邏輯)
         st.markdown(f"### 🔍 {sel_stock} 估值指標")
         c1, c2, c3 = st.columns(3)
         
-        c1.metric("本益比 (Trailing P/E)", f"{pe_trailing:.2f}" if pe_trailing else "N/A")
-        c2.metric("遠期本益比 (Forward P/E)", f"{pe_forward:.2f}" if pe_forward else "N/A")
+        pe_t = info.get('trailingPE')
+        pe_f = info.get('forwardPE')
         
-        pe_diff = ((pe_forward - pe_trailing) / pe_trailing * 100) if pe_trailing and pe_forward else 0
-        c3.metric("P/E 變化預期", f"{pe_diff:.1f}%", help="負值代表市場預期未來獲利增長，導致 Forward P/E 降低")
+        c1.metric("本益比 (Trailing P/E)", f"{pe_t:.2f}" if pe_t else "N/A")
+        c2.metric("遠期本益比 (Forward P/E)", f"{pe_f:.2f}" if pe_f else "N/A")
+        
+        if pe_t and pe_f:
+            pe_diff = ((pe_f - pe_t) / pe_t * 100)
+            c3.metric("P/E 預期變化", f"{pe_diff:.1f}%")
+        else:
+            c3.metric("P/E 預期變化", "N/A")
 
         st.markdown("---")
         
-        # --- B. EPS 獲利分析 (GAAP vs Non-GAAP) ---
+        # B. EPS 分析 (GAAP vs Non-GAAP)
         st.markdown("### 💰 獲利能力分析 (EPS)")
-        
-        # 建立展示表格
         eps_data = {
             "指標": ["每股盈餘 (EPS Trailing)", "預估每股盈餘 (Forward EPS)"],
             "數值": [
                 f"${info.get('trailingEps', 0):.2f}",
                 f"${info.get('forwardEps', 0):.2f}"
             ],
-            "類型說明": ["通常為 GAAP (標準會計準則)", "通常為 Non-GAAP / 分析師調整後預估"]
+            "說明": ["GAAP (標準會計)", "Non-GAAP (分析師調整後)"]
         }
         st.table(pd.DataFrame(eps_data))
 
-        with st.expander("📝 專有名詞小科普"):
-            st.write("""
-            - **GAAP EPS**: 嚴格遵守會計準則的獲利，包含所有一次性支出或股票獎勵開支。
-            - **Non-GAAP EPS**: 剔除一次性或非現金支出，更能反映公司『營運核心』的獲利能力。
-            - **Trailing vs Forward**: Trailing 是看過去一年的成績單；Forward 是看分析師對未來一年的期望。
-            """)
-
-        # --- C. 歷史獲利趨勢 (圖表) ---
+        # C. 獲利趨勢 (修復 Net Income 錯誤)
         st.markdown("### 📊 近年獲利趨勢")
-        if not financials.empty:
-            # 取得淨利數據 (Net Income)
-            net_income = financials.loc['Net Income'].head(4) # 取近四年
-            income_df = pd.DataFrame(net_income).reset_index()
-            income_df.columns = ['年度', '淨利 (Net Income)']
-            st.bar_chart(data=income_df, x='年度', y='淨利 (Net Income)')
-        else:
-            st.info("暫無歷史獲利趨勢數據。")
+        try:
+            # 優先嘗試抓取年度利潤，若失敗則顯示提示
+            hist_earnings = tk.earnings_dates
+            if hist_earnings is not None and not hist_earnings.empty:
+                st.write("近期盈餘發布紀錄 (EPS Actual vs Estimate):")
+                st.dataframe(hist_earnings.head(8))
+            else:
+                # 備案：顯示年度總收入趨勢
+                financials = tk.financials
+                if not financials.empty and 'Net Income' in financials.index:
+                    net_inc = financials.loc['Net Income'].head(4)
+                    st.bar_chart(net_inc)
+                else:
+                    st.info("該標的暫無詳細歷史獲利圖表數據。")
+        except:
+            st.info("無法獲取歷史趨勢圖，請參考上方 EPS 數據。")
 
 except Exception as e:
-    st.error(f"數據讀取失敗: {e}")
+    st.error(f"數據加載失敗: {e}")
