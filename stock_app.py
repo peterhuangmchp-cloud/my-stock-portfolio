@@ -25,13 +25,12 @@ def check_password():
 
 check_password()
 
-# --- 3. 核心數據讀取 (對接您的 GSHEET_ID) ---
+# --- 3. 核心數據讀取 ---
 st.title("📊 全球資產損益與配息看板")
 
 gsheet_id = st.secrets.get("GSHEET_ID")
 
 def load_data(sheet_id):
-    # 根據您的截圖，gid 為 1797698775
     url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid=1797698775"
     headers = {"User-Agent": "Mozilla/5.0"}
     response = requests.get(url, headers=headers)
@@ -49,11 +48,12 @@ def get_exchange_rate():
 usd_to_twd = get_exchange_rate()
 st.sidebar.metric("當前匯率 (USD/TWD)", f"{usd_to_twd:.2f}")
 
-# --- 修正後的顏色函數：確保正數顯示黑色，負數顯示紅色 ---
-def color_roi(val):
-    if val < 0:
+# --- 🎨 顏色邏輯修正：>0 藍色, <=0 紅色 ---
+def color_roi_custom(val):
+    if val > 0:
+        return 'color: blue'
+    else:
         return 'color: red'
-    return 'color: black' # 明確指定黑色，避免數字消失
 
 try:
     df = load_data(gsheet_id)
@@ -70,7 +70,7 @@ try:
             divs = tk.dividends
             div_map[sym] = divs[divs.index > (pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=365))].sum() if not divs.empty else 0.0
 
-    # 運算邏輯 (完全保留原本 Feature)
+    # 運算邏輯 (完全保留原本 Feature 與公式)
     bond_list = ['TLT', 'SHV', 'SGOV', 'LQD']
     def process_row(row):
         curr_price = price_map.get(row['symbol'], 0)
@@ -91,7 +91,7 @@ try:
         yield_rate = (div_per_share / curr_price * 100) if curr_price > 0 else 0
         drop_from_high = ((curr_price - h52) / h52 * 100) if h52 > 0 else 0
         
-        return pd.Series([curr_price, mv_twd, profit_twd, roi, net_div_twd, yield_rate, h52, info['year_low'], drop_from_high])
+        return pd.Series([curr_price, mv_twd, profit_twd, roi, net_div_twd, yield_rate, h52, l52_map.get(row['symbol'], 0), drop_from_high])
 
     df[['current_price', 'mv_twd', 'profit_twd', 'roi', 'net_div_twd', 'yield_rate', 'h52', 'l52', 'drop_from_high']] = df.apply(process_row, axis=1)
 
@@ -115,13 +115,13 @@ try:
         st.subheader("📈 個股損益排行 (TWD)")
         st.plotly_chart(px.bar(df.sort_values('profit_twd'), x='profit_twd', y='name', orientation='h', color='profit_twd', color_continuous_scale='RdYlGn'), use_container_width=True)
 
-    # D. 原始持倉清單 (修正數字消失問題)
+    # D. 原始持倉清單 (ROI >0 藍色, <=0 紅色)
     st.subheader("📝 完整持倉清單")
     st.dataframe(df[['name', 'symbol', 'shares', 'cost', 'current_price', 'profit_twd', 'roi']].style.format({
         'current_price': '{:.2f}', 'profit_twd': '{:,.0f}', 'roi': '{:.2f}%'
-    }).applymap(color_roi, subset=['roi']), use_container_width=True)
+    }).applymap(color_roi_custom, subset=['roi']), use_container_width=True)
 
-    # E. 52 週高低點監控表 (維持原格式，跌幅固定標紅)
+    # E. 52 週高低點監控表 (跌幅固定紅色)
     st.markdown("---")
     st.subheader("📉 52 週高低點風險監控 (USD/Local)")
     risk_df = df[['name', 'symbol', 'current_price', 'h52', 'l52', 'drop_from_high']].copy()
