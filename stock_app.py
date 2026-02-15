@@ -5,10 +5,10 @@ import plotly.express as px
 import io
 import requests
 
-# --- 1. 網頁基本設定 ---
+# --- 1. 網頁基本設定 (維持不變) ---
 st.set_page_config(page_title="全球資產損益與配息分析", layout="wide", page_icon="💰")
 
-# --- 2. 🔐 密碼保護功能 ---
+# --- 2. 🔐 密碼保護功能 (維持不變) ---
 def check_password():
     if "authenticated" not in st.session_state:
         st.session_state["authenticated"] = False
@@ -25,12 +25,13 @@ def check_password():
 
 check_password()
 
-# --- 3. 核心數據讀取 ---
+# --- 3. 核心數據讀取 (對接您的 GSHEET_ID) ---
 st.title("📊 全球資產損益與配息看板")
 
 gsheet_id = st.secrets.get("GSHEET_ID")
 
 def load_data(sheet_id):
+    # 根據您的截圖，gid 為 1797698775
     url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid=1797698775"
     headers = {"User-Agent": "Mozilla/5.0"}
     response = requests.get(url, headers=headers)
@@ -48,10 +49,11 @@ def get_exchange_rate():
 usd_to_twd = get_exchange_rate()
 st.sidebar.metric("當前匯率 (USD/TWD)", f"{usd_to_twd:.2f}")
 
-# 定義顏色函數：數值小於 0 顯示紅色，其餘預設
-def color_negative_red(val):
-    color = 'red' if val < 0 else None
-    return f'color: {color}'
+# --- 修正後的顏色函數：確保正數顯示黑色，負數顯示紅色 ---
+def color_roi(val):
+    if val < 0:
+        return 'color: red'
+    return 'color: black' # 明確指定黑色，避免數字消失
 
 try:
     df = load_data(gsheet_id)
@@ -65,17 +67,14 @@ try:
             price_map[sym] = info['last_price']
             h52_map[sym] = info['year_high']
             l52_map[sym] = info['year_low']
-            
             divs = tk.dividends
             div_map[sym] = divs[divs.index > (pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=365))].sum() if not divs.empty else 0.0
 
-    # 運算邏輯 (維持原本 Feature)
+    # 運算邏輯 (完全保留原本 Feature)
     bond_list = ['TLT', 'SHV', 'SGOV', 'LQD']
     def process_row(row):
         curr_price = price_map.get(row['symbol'], 0)
         h52 = h52_map.get(row['symbol'], 0)
-        l52 = l52_map.get(row['symbol'], 0)
-        
         mv_twd = curr_price * row['shares'] * (usd_to_twd if row['currency'] == "USD" else 1)
         cost_twd = row['cost'] * row['shares'] * (usd_to_twd if row['currency'] == "USD" else 1)
         profit_twd = mv_twd - cost_twd
@@ -92,7 +91,7 @@ try:
         yield_rate = (div_per_share / curr_price * 100) if curr_price > 0 else 0
         drop_from_high = ((curr_price - h52) / h52 * 100) if h52 > 0 else 0
         
-        return pd.Series([curr_price, mv_twd, profit_twd, roi, net_div_twd, yield_rate, h52, l52, drop_from_high])
+        return pd.Series([curr_price, mv_twd, profit_twd, roi, net_div_twd, yield_rate, h52, info['year_low'], drop_from_high])
 
     df[['current_price', 'mv_twd', 'profit_twd', 'roi', 'net_div_twd', 'yield_rate', 'h52', 'l52', 'drop_from_high']] = df.apply(process_row, axis=1)
 
@@ -116,18 +115,17 @@ try:
         st.subheader("📈 個股損益排行 (TWD)")
         st.plotly_chart(px.bar(df.sort_values('profit_twd'), x='profit_twd', y='name', orientation='h', color='profit_twd', color_continuous_scale='RdYlGn'), use_container_width=True)
 
-    # D. 原始持倉清單 (新增 ROI 紅字效果)
+    # D. 原始持倉清單 (修正數字消失問題)
     st.subheader("📝 完整持倉清單")
     st.dataframe(df[['name', 'symbol', 'shares', 'cost', 'current_price', 'profit_twd', 'roi']].style.format({
         'current_price': '{:.2f}', 'profit_twd': '{:,.0f}', 'roi': '{:.2f}%'
-    }).applymap(color_negative_red, subset=['roi']), use_container_width=True)
+    }).applymap(color_roi, subset=['roi']), use_container_width=True)
 
-    # E. 52 週高低點監控表 (距高點跌幅全標紅)
+    # E. 52 週高低點監控表 (維持原格式，跌幅固定標紅)
     st.markdown("---")
     st.subheader("📉 52 週高低點風險監控 (USD/Local)")
     risk_df = df[['name', 'symbol', 'current_price', 'h52', 'l52', 'drop_from_high']].copy()
     risk_df.columns = ['名稱', '代號', '目前現價', '52週最高', '52週最低', '較高點跌幅 %']
-    
     st.dataframe(risk_df.style.format({
         '目前現價': '{:.2f}', '52週最高': '{:.2f}', '52週最低': '{:.2f}', '較高點跌幅 %': '{:.2f}%'
     }).applymap(lambda x: 'color: red', subset=['較高點跌幅 %']), use_container_width=True)
