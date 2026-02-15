@@ -31,8 +31,8 @@ try:
         h['Upper'] = h['MA20'] + (h['Close'].rolling(20).std() * 2)
         h['Lower'] = h['MA20'] - (h['Close'].rolling(20).std() * 2)
         
-        # 乖離率 (BIAS) 計算 - 相對於 MA20
-        h['BIAS'] = ((h['Close'] - h['MA20']) / h['MA20']) * 100
+        # --- 修正：乖離率 (BIAS) 計算基準改為 MA200 ---
+        h['BIAS'] = ((h['Close'] - h['MA200']) / h['MA200']) * 100
         
         # RSI 手動計算
         delta = h['Close'].diff()
@@ -43,7 +43,6 @@ try:
         # --- 技術指標分析診斷邏輯 ---
         last_close = h['Close'].iloc[-1]
         last_rsi = h['RSI'].iloc[-1]
-        last_ma20 = h['MA20'].iloc[-1]
         last_ma50 = h['MA50'].iloc[-1]
         last_ma200 = h['MA200'].iloc[-1]
         last_upper = h['Upper'].iloc[-1]
@@ -53,33 +52,34 @@ try:
         # 診斷狀態
         trend = "📈 多頭排列" if last_ma50 > last_ma200 else "📉 空頭排列"
         rsi_status = "⚠️ 超買 (過熱)" if last_rsi > 70 else ("✅ 超賣 (超跌)" if last_rsi < 30 else "⚖️ 中性平衡")
-        bias_status = "🔥 乖離過高" if last_bias > 5 else ("❄️ 乖離過低" if last_bias < -5 else "⚓ 乖離正常")
+        # 長線乖離判斷標準通常較寬，此處設為 15% 作為警示參考
+        bias_status = "🔥 長線乖離過高" if last_bias > 15 else ("❄️ 長線乖離過低" if last_bias < -15 else "⚓ 長線乖離正常")
 
         # --- 顯示診斷面板 ---
         st.markdown("---")
         a1, a2, a3 = st.columns(3)
         a1.metric("長期趨勢判斷", trend)
         a2.metric("RSI 指標狀態", rsi_status, f"{last_rsi:.1f}")
-        a3.metric("20日乖離率", bias_status, f"{last_bias:.2f}%")
+        a3.metric("200日乖離率", bias_status, f"{last_bias:.2f}%")
 
         with st.expander("💡 綜合操作建議", expanded=True):
             advice = []
             if last_ma50 > last_ma200:
-                advice.append("- **趨勢面**：當前處於多頭市場，建議以『拉回找買點』為主。")
+                advice.append("- **趨勢面**：當前處於多頭市場，MA200 具備強力支撐。")
             else:
-                advice.append("- **趨勢面**：當前處於空頭市場，應保守操作，注意下行風險。")
+                advice.append("- **趨勢面**：當前處於空頭市場，股價長期低於 MA200，走勢偏弱。")
             
-            if last_bias > 7:
-                advice.append("- **乖離警示**：目前股價遠高於 20 日均線，短線追高風險極大，建議等待回測。")
-            elif last_bias < -7:
-                advice.append("- **乖離警示**：目前股價遠低於 20 日均線，具備乖離修正的跌深反彈動能。")
+            if last_bias > 20:
+                advice.append("- **長線風險**：目前股價與 MA200 的正乖離率過大，代表長線基期已高，需預防均值回歸的拉回壓力。")
+            elif last_bias < -20:
+                advice.append("- **長線機會**：目前股價與 MA200 的負乖離率極大，處於歷史低位區，可留意超跌反彈的長線佈局機會。")
             
             if last_rsi > 70:
-                advice.append("- **風險提醒**：RSI 顯示股價過熱，可考慮分批減碼獲利。")
+                advice.append("- **短線提醒**：RSI 顯示股價短線過熱。")
             
             st.write("\n".join(advice))
 
-        # --- 繪製四層圖表 (加入乖離率) ---
+        # --- 繪製四層圖表 ---
         fig = make_subplots(
             rows=4, cols=1, 
             shared_xaxes=True, 
@@ -94,8 +94,8 @@ try:
         fig.add_trace(go.Scatter(x=h.index, y=h['Upper'], name='布林上軌', line=dict(color='rgba(173,216,230,0.5)', width=1)), row=1, col=1)
         fig.add_trace(go.Scatter(x=h.index, y=h['Lower'], name='布林下軌', line=dict(color='rgba(173,216,230,0.5)', width=1), fill='tonexty'), row=1, col=1)
         
-        # 2. 乖離率 BIAS (新加入)
-        fig.add_trace(go.Scatter(x=h.index, y=h['BIAS'], name='20D乖離率%', line=dict(color='green', width=1.5)), row=2, col=1)
+        # 2. 乖離率 BIAS (相對於 MA200)
+        fig.add_trace(go.Scatter(x=h.index, y=h['BIAS'], name='200D乖離率%', line=dict(color='green', width=1.5)), row=2, col=1)
         fig.add_hline(y=0, line_dash="solid", line_color="gray", row=2, col=1)
         
         # 3. 成交量
