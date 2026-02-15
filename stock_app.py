@@ -5,7 +5,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 # 1. 網頁基本設定
-st.set_page_config(page_title="全球資產損益與現金流儀表板", layout="wide", page_icon="💰")
+st.set_page_config(page_title="全球資產損益、配息與雙均線分析", layout="wide", page_icon="💰")
 st.title("📊 全球資產損益與現金流儀表板")
 
 # 2. 核心函數
@@ -38,14 +38,18 @@ try:
     
     with st.spinner('正在同步全球報價、配息與均線數據...'):
         price_map = {}
+        ma50_map = {}
         ma200_map = {}
         div_map = {} 
         
         for sym in unique_symbols:
             tk = yf.Ticker(sym)
             price_map[sym] = tk.fast_info['last_price']
-            hist = tk.history(period="1y")
+            # 抓取 2 年歷史數據以精確計算均線
+            hist = tk.history(period="2y")
+            ma50_map[sym] = hist['Close'].rolling(window=50).mean().iloc[-1] if len(hist) >= 50 else None
             ma200_map[sym] = hist['Close'].rolling(window=200).mean().iloc[-1] if len(hist) >= 200 else None
+            
             divs = tk.dividends
             if not divs.empty:
                 last_year = divs[divs.index > (pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=365))]
@@ -53,7 +57,7 @@ try:
             else:
                 div_map[sym] = 0.0
 
-    # 4. 邏輯運算 (含稅務處理)
+    # 4. 邏輯運算 (含稅務與損益)
     bond_list = ['TLT', 'SHV', 'SGOV', 'LQD']
 
     def process_row(row):
@@ -92,16 +96,14 @@ try:
     div_df = df[df['net_div_twd'] > 0][['name', 'symbol', 'shares', 'yield_rate', 'net_div_twd']].copy()
     
     if not div_df.empty:
-        # 顯示可排序表格
         st.dataframe(div_df.sort_values('net_div_twd', ascending=False).style.format({
             'yield_rate': '{:.2f}%', 'net_div_twd': '{:,.0f}'
         }), use_container_width=True)
-        # 匯出按鈕
         st.download_button("📥 匯出配息統計表", div_df.to_csv(index=False).encode('utf-8-sig'), "dividend_report.csv", "text/csv")
     else:
         st.info("目前持倉中尚未有配息記錄的標的。")
 
-    # --- C. 持倉明細與圖表 (原有資訊) ---
+    # --- C. 持倉明細與圖表 ---
     st.markdown("---")
     c1, c2 = st.columns(2)
     with c1:
@@ -118,21 +120,36 @@ try:
     }), use_container_width=True)
     st.download_button("📥 匯出完整持倉明細", detail_df.to_csv(index=False).encode('utf-8-sig'), "portfolio_detail.csv", "text/csv")
 
-    # --- D. 股票趨勢分析 (200MA) ---
+    # --- D. 股票趨勢分析 (50MA + 200MA) ---
     st.markdown("---")
-    st.subheader("🔍 股票長期趨勢分析 (200MA)")
+    st.subheader("🔍 股票長期趨勢分析 (50MA / 200MA)")
     stock_options = df[~df['symbol'].isin(bond_list)]['symbol'].unique()
     if len(stock_options) > 0:
         sel_stock = st.selectbox("請選擇要分析的股票：", stock_options)
-        with st.spinner('載入走勢圖中...'):
+        with st.spinner('載入雙均線走勢圖中...'):
             tk_obj = yf.Ticker(sel_stock)
             h_data = tk_obj.history(period="2y")
+            h_data['ma50_line'] = h_data['Close'].rolling(window=50).mean()
             h_data['ma200_line'] = h_data['Close'].rolling(window=200).mean()
+            
             fig = go.Figure()
-            fig.add_trace(go.Scatter(x=h_data.index, y=h_data['Close'], name='收盤價'))
-            fig.add_trace(go.Scatter(x=h_data.index, y=h_data['ma200_line'], name='200MA', line=dict(dash='dash')))
-            fig.update_layout(hovermode="x unified", template="plotly_white")
+            fig.add_trace(go.Scatter(x=h_data.index, y=h_data['Close'], name='收盤價', line=dict(color='#1f77b4', width=2)))
+            fig.add_trace(go.Scatter(x=h_data.index, y=h_data['ma50_line'], name='50MA (季線)', line=dict(color='#2ca02c', dash='dot')))
+            fig.add_trace(go.Scatter(x=h_data.index, y=h_data['ma200_line'], name='200MA (年線)', line=dict(color='#ff7f0e', dash='dash')))
+            
+            fig.update_layout(title=f"{sel_stock} 雙均線趨勢圖", hovermode="x unified", template="plotly_white")
             st.plotly_chart(fig, use_container_width=True)
+            
+            # 狀態顯示
+            curr_p = h_data['Close'].iloc[-1]
+            m50 = h_data['ma50_line'].iloc[-1]
+            m200 = h_data['ma200_line'].iloc[-1]
+            
+            s_col1, s_col2 = st.columns(2)
+            if m50 and m200:
+                cross_status = "🟢 黃金交叉 (50MA > 200MA)" if m50 > m200 else "🔴 死亡交叉 (50MA < 200MA)"
+                s_col1.info(f"均線狀態：**{cross_status}**")
+                s_col2.info(f"目前股價相對於 200MA 乖離率：**{((curr_p-m200)/m200*100):.2f}%**")
 
 except Exception as e:
     st.error(f"系統執行錯誤: {e}")
