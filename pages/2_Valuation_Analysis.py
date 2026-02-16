@@ -12,7 +12,7 @@ st.title("📈 個股獲利與估值深度分析")
 gsheet_id = st.secrets.get("GSHEET_ID")
 
 def load_symbols():
-    url = f"https://docs.google.com/spreadsheets/d/{gsheet_id}/export?format=csv&gid=1797698775"
+    url = f"https://docs.google.com/spreadsheets/d/{gsheet_id}/export?format=csv&gid=601349851"
     return pd.read_csv(url)['symbol'].unique()
 
 try:
