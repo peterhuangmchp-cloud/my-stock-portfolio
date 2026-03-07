@@ -25,7 +25,7 @@ def check_password():
 
 check_password()
 
-# --- 3. 核心數據讀取 (維持原樣) ---
+# --- 3. 核心數據讀取 ---
 st.title("📊 全球資產損益與配息看板")
 gsheet_id = st.secrets.get("GSHEET_ID")
 
@@ -47,7 +47,6 @@ def get_exchange_rate():
 usd_to_twd = get_exchange_rate()
 st.sidebar.metric("當前匯率 (USD/TWD)", f"{usd_to_twd:.2f}")
 
-# 🎨 顏色邏輯：>0 藍色, <=0 紅色 (恢復原樣)
 def color_roi_custom(val):
     if isinstance(val, (int, float)):
         return 'color: blue' if val > 0 else 'color: red'
@@ -56,8 +55,8 @@ def color_roi_custom(val):
 try:
     df = load_data(gsheet_id)
     
-    # --- 4. 數據同步 (歷史與即時) ---
-    with st.spinner('正在同步數據並對齊全球時區...'):
+    # --- 4. 數據同步：抓取 3 個月歷史並每週抽樣 ---
+    with st.spinner('正在分析過去三個月每週資產數據...'):
         price_map, prev_close_map, div_map, h52_map, l52_map = {}, {}, {}, {}, {}
         history_list = []
         
@@ -71,20 +70,22 @@ try:
             h52_map[index] = fast['year_high']
             l52_map[index] = fast['year_low']
             
-            # 歷史數據：去除時區避免重複日期報錯 (解決 Duplicate Column 問題)
-            h_data = tk.history(period="5d", auto_adjust=False)['Close']
-            h_data.index = h_data.index.tz_localize(None).normalize()
+            # 抓取 3 個月歷史
+            h_data = tk.history(period="3mo", auto_adjust=False)['Close']
+            # 去時區化並重取樣為「每週五」(W-FRI)
+            h_data.index = h_data.index.tz_localize(None)
+            weekly_data = h_data.resample('W-FRI').last()
             
             rate = usd_to_twd if row['currency'].upper() == "USD" else 1
-            # 確保 Index 唯一以避免 Styler 報錯
             unique_name = f"{row['name']} ({sym}) #{index}"
-            sym_history = (h_data * row['shares'] * rate).to_frame(name=unique_name)
+            
+            sym_history = (weekly_data * row['shares'] * rate).to_frame(name=unique_name)
             history_list.append(sym_history)
             
             divs = tk.dividends
             div_map[sym] = divs[divs.index > (pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=365))].sum() if not divs.empty else 0.0
 
-    # --- 5. 數據運算 (恢復原本所有欄位) ---
+    # --- 5. 當前數據運算 (不變) ---
     bond_list = ['TLT', 'SHV', 'SGOV', 'LQD']
     def process_row(row):
         idx = row.name
@@ -106,14 +107,15 @@ try:
     df[['current_price', 'mv_twd', 'profit_twd', 'roi', 'net_div_twd', 'yield_rate', 'daily_change_twd']] = df.apply(process_row, axis=1)
     total_mv = df['mv_twd'].sum()
 
-    # --- 6. 診斷表合併邏輯 ---
-    five_day_df = pd.concat(history_list, axis=1).T
-    five_day_df = five_day_df.groupby(level=0, axis=1).last() # 合併重複日期
-    five_day_df.columns = [d.strftime('%m/%d') for d in five_day_df.columns]
-    summary_row = five_day_df.sum().to_frame(name='Σ 總資產市值 (TWD)').T
-    five_day_df = pd.concat([five_day_df, summary_row])
+    # --- 6. 製作每週資產變化表 ---
+    weekly_df = pd.concat(history_list, axis=1).T
+    weekly_df.columns = [d.strftime('%Y-%m-%d') for d in weekly_df.columns]
+    
+    # 加入總計列
+    summary_row = weekly_df.sum().to_frame(name='Σ 總資產市值 (TWD)').T
+    weekly_df = pd.concat([weekly_df, summary_row])
 
-    # --- A. 摘要儀表板 (恢復原樣 5 欄) ---
+    # --- A. 摘要儀表板 ---
     total_daily_change = df['daily_change_twd'].sum()
     daily_pct = (total_daily_change / (total_mv - total_daily_change) * 100) if (total_mv - total_daily_change) != 0 else 0
 
@@ -124,12 +126,12 @@ try:
     m4.metric("年度預估稅後配息", f"${df['net_div_twd'].sum():,.0f}")
     m5.metric("當前匯率", f"{usd_to_twd:.2f}")
 
-    # --- B. 近 5 個交易日明細表 (僅在此插入) ---
+    # --- B. 過去三個月每週變化表 (插入於此) ---
     st.markdown("---")
-    st.subheader("🗓️ 近 5 個交易日：單一資產市值變化 (TWD)")
-    st.dataframe(five_day_df.style.format("{:,.0f}"), use_container_width=True)
+    st.subheader("🗓️ 過去三個月：每週資產市值變化 (TWD)")
+    st.dataframe(weekly_df.style.format("{:,.0f}"), use_container_width=True)
 
-    # --- C, D, E 完全恢復原始樣式 ---
+    # --- C, D, E 維持原樣格式 ---
     st.markdown("---")
     c1, c2 = st.columns(2)
     with c1:
