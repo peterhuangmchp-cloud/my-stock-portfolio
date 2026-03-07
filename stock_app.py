@@ -5,10 +5,10 @@ import plotly.express as px
 import io
 import requests
 
-# --- 1. 網頁基本設定 (原始版) ---
+# --- 1. 網頁基本設定 (原始) ---
 st.set_page_config(page_title="全球資產損益與配息分析", layout="wide", page_icon="💰")
 
-# --- 2. 🔐 密碼保護功能 (原始版) ---
+# --- 2. 🔐 密碼保護功能 (原始) ---
 def check_password():
     if "authenticated" not in st.session_state:
         st.session_state["authenticated"] = False
@@ -47,7 +47,7 @@ def get_exchange_rate():
 usd_to_twd = get_exchange_rate()
 st.sidebar.metric("當前匯率 (USD/TWD)", f"{usd_to_twd:.2f}")
 
-# 🎨 顏色邏輯：>0 藍色, <=0 紅色 (原始設定)
+# 🎨 顏色邏輯：恢復原始設定
 def color_roi_custom(val):
     if isinstance(val, (int, float)):
         return 'color: blue' if val > 0 else 'color: red'
@@ -56,8 +56,8 @@ def color_roi_custom(val):
 try:
     df = load_data(gsheet_id)
     
-    # --- 4. 數據同步 (歷史與即時，含 700 萬修正邏輯) ---
-    with st.spinner('正在同步全球即時行情...'):
+    # --- 4. 數據同步 (修正斷崖與欄位缺失問題) ---
+    with st.spinner('正在同步全球行情...'):
         price_map, prev_close_map, div_map, h52_map, l52_map = {}, {}, {}, {}, {}
         history_list = []
         
@@ -66,12 +66,13 @@ try:
             tk = yf.Ticker(sym)
             fast = tk.fast_info
             
+            # 【關鍵還原】: 確保欄位名稱與您的原始 DataFrame 完全一致
             price_map[index] = fast['last_price']
             prev_close_map[index] = fast['previous_close']
             h52_map[index] = fast['year_high']
             l52_map[index] = fast['year_low']
             
-            # 抓取歷史：去除時區標籤並補齊空值 (解決斷崖問題)
+            # 抓取歷史並補洞
             h_data = tk.history(period="3mo", auto_adjust=False)['Close']
             h_data.index = h_data.index.tz_localize(None).normalize()
             
@@ -82,7 +83,7 @@ try:
             divs = tk.dividends
             div_map[sym] = divs[divs.index > (pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=365))].sum() if not divs.empty else 0.0
 
-    # --- 5. 數據運算 (還原所有原始欄位) ---
+    # --- 5. 數據運算 (確保產出 h52, l52 欄位以供後續使用) ---
     bond_list = ['TLT', 'SHV', 'SGOV', 'LQD']
     def process_row(row):
         idx = row.name
@@ -99,17 +100,20 @@ try:
         tax_rate = 0.7 if row['currency'].upper() == "USD" and row['symbol'] not in bond_list else 1.0
         net_div_twd = div_per_share * row['shares'] * tax_rate * rate
         yield_rate = (div_per_share / curr_price * 100) if curr_price > 0 else 0
-        return pd.Series([curr_price, mv_twd, profit_twd, roi, net_div_twd, yield_rate, daily_change])
+        
+        # 這裡必須回傳跟原始表格對應的所有欄位
+        return pd.Series([curr_price, mv_twd, profit_twd, roi, net_div_twd, yield_rate, daily_change, h52_map.get(idx, 0), l52_map.get(idx, 0)])
 
-    df[['current_price', 'mv_twd', 'profit_twd', 'roi', 'net_div_twd', 'yield_rate', 'daily_change_twd']] = df.apply(process_row, axis=1)
+    # 【核心修正】: 確保留住 h52 與 l52 欄位，解決截圖中的錯誤
+    df[['current_price', 'mv_twd', 'profit_twd', 'roi', 'net_div_twd', 'yield_rate', 'daily_change_twd', 'h52', 'l52']] = df.apply(process_row, axis=1)
     total_mv = df['mv_twd'].sum()
 
-    # --- 6. 趨勢圖校正 (對齊現價) ---
+    # --- 6. 趨勢圖校正 ---
     history_combined = pd.concat(history_list, axis=1).interpolate(method='linear').ffill().bfill()
     trend_data = history_combined.sum(axis=1).to_frame(name='Total_MV')
-    trend_data.iloc[-1] = total_mv # 強制最後一點等於當前總值
+    trend_data.iloc[-1] = total_mv 
 
-    # --- A. 摘要儀表板 (還原 5 欄) ---
+    # --- A. 摘要儀表板 ---
     total_daily_change = df['daily_change_twd'].sum()
     daily_pct = (total_daily_change / (total_mv - total_daily_change) * 100) if (total_mv - total_daily_change) != 0 else 0
 
@@ -120,14 +124,14 @@ try:
     m4.metric("年度預估稅後配息", f"${df['net_div_twd'].sum():,.0f}")
     m5.metric("當前匯率", f"{usd_to_twd:.2f}")
 
-    # --- B. 過去 3 個月趨勢圖 (位置還原) ---
+    # --- B. 趨勢圖 ---
     st.markdown("---")
-    st.subheader("📈 過去 3 個月資產估值趨勢")
+    st.subheader("📈 過去 3 個月資產估值趨勢 (對齊當前現價)")
     fig_trend = px.area(trend_data, x=trend_data.index, y='Total_MV')
     fig_trend.update_layout(hovermode="x unified", template="plotly_white", height=400, yaxis=dict(tickformat=",.0f"))
     st.plotly_chart(fig_trend, use_container_width=True)
 
-    # --- C. 圓餅圖與長條圖 (位置還原) ---
+    # --- C. 圖表區 ---
     st.markdown("---")
     c1, c2 = st.columns(2)
     with c1:
@@ -137,14 +141,14 @@ try:
         st.subheader("📈 個股損益排行 (TWD)")
         st.plotly_chart(px.bar(df.sort_values('profit_twd'), x='profit_twd', y='name', orientation='h', color='profit_twd', color_continuous_scale='RdYlGn'), use_container_width=True)
 
-    # --- D. 完整持倉清單 (恢復藍紅顏色) ---
+    # --- D. 完整持倉清單 ---
     st.markdown("---")
     st.subheader("📝 完整持倉清單")
     st.dataframe(df[['name', 'symbol', 'shares', 'current_price', 'daily_change_twd', 'profit_twd', 'roi']].style.format({
         'current_price': '{:.2f}', 'daily_change_twd': '{:,.0f}', 'profit_twd': '{:,.0f}', 'roi': '{:.2f}%'
     }).applymap(color_roi_custom, subset=['roi', 'daily_change_twd']), use_container_width=True)
 
-    # --- E. 配息與風險監控 (位置還原) ---
+    # --- E. 配息統計與 52 週監控 (位置與內容還原) ---
     st.markdown("---")
     k1, k2 = st.columns([1, 1.2])
     with k1:
@@ -154,6 +158,7 @@ try:
         st.subheader("📉 52 週高低點風險監控")
         risk_df = df[['name', 'symbol', 'current_price', 'h52', 'l52']].copy()
         risk_df['較高點跌幅 %'] = ((risk_df['current_price'] - risk_df['h52']) / risk_df['h52'] * 100)
+        # 【關鍵恢復】: 這裡不再報錯，因為 h52, l52 已正確存入 df
         st.dataframe(risk_df.style.format({
             'current_price': '{:.2f}', 'h52': '{:.2f}', 'l52': '{:.2f}', '較高點跌幅 %': '{:.2f}%'
         }).applymap(lambda x: 'color: red', subset=['較高點跌幅 %']), use_container_width=True)
