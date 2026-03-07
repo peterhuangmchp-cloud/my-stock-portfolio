@@ -5,10 +5,10 @@ import plotly.express as px
 import io
 import requests
 
-# --- 1. 網頁基本設定 (維持原樣) ---
+# --- 1. 網頁基本設定 (原始版) ---
 st.set_page_config(page_title="全球資產損益與配息分析", layout="wide", page_icon="💰")
 
-# --- 2. 🔐 密碼保護功能 (維持原樣) ---
+# --- 2. 🔐 密碼保護功能 (原始版) ---
 def check_password():
     if "authenticated" not in st.session_state:
         st.session_state["authenticated"] = False
@@ -25,7 +25,7 @@ def check_password():
 
 check_password()
 
-# --- 3. 核心數據讀取 (維持原樣) ---
+# --- 3. 核心數據讀取 (原始版) ---
 st.title("📊 全球資產損益與配息看板")
 gsheet_id = st.secrets.get("GSHEET_ID")
 
@@ -47,6 +47,7 @@ def get_exchange_rate():
 usd_to_twd = get_exchange_rate()
 st.sidebar.metric("當前匯率 (USD/TWD)", f"{usd_to_twd:.2f}")
 
+# 🎨 顏色邏輯：>0 藍色, <=0 紅色 (原始設定)
 def color_roi_custom(val):
     if isinstance(val, (int, float)):
         return 'color: blue' if val > 0 else 'color: red'
@@ -55,8 +56,8 @@ def color_roi_custom(val):
 try:
     df = load_data(gsheet_id)
     
-    # --- 4. 數據同步 (改為 6 個月，並確保 h52/l52 存入) ---
-    with st.spinner('正在同步全球行情與 6 個月趨勢數據...'):
+    # --- 4. 數據同步 (改為 6 個月趨勢) ---
+    with st.spinner('正在同步 6 個月行情數據...'):
         price_map, prev_close_map, div_map, h52_map, l52_map = {}, {}, {}, {}, {}
         history_list = []
         
@@ -70,7 +71,7 @@ try:
             h52_map[index] = fast['year_high']
             l52_map[index] = fast['year_low']
             
-            # 【改動 1】: 週期改為 6mo
+            # 抓取 6 個月歷史
             h_data = tk.history(period="6mo", auto_adjust=False)['Close']
             h_data.index = h_data.index.tz_localize(None).normalize()
             
@@ -81,7 +82,7 @@ try:
             divs = tk.dividends
             div_map[sym] = divs[divs.index > (pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=365))].sum() if not divs.empty else 0.0
 
-    # --- 5. 數據運算 (維持原樣) ---
+    # --- 5. 數據運算 (確保所有原始欄位存在) ---
     bond_list = ['TLT', 'SHV', 'SGOV', 'LQD']
     def process_row(row):
         idx = row.name
@@ -108,7 +109,7 @@ try:
     trend_data = history_combined.sum(axis=1).to_frame(name='Total_MV')
     trend_data.iloc[-1] = total_mv 
 
-    # --- A. 摘要指標 (5 欄) ---
+    # --- A. 摘要儀表板 (原始 5 欄) ---
     total_daily_change = df['daily_change_twd'].sum()
     daily_pct = (total_daily_change / (total_mv - total_daily_change) * 100) if (total_mv - total_daily_change) != 0 else 0
 
@@ -119,9 +120,14 @@ try:
     m4.metric("年度預估稅後配息", f"${df['net_div_twd'].sum():,.0f}")
     m5.metric("當前匯率", f"{usd_to_twd:.2f}")
 
-    # --- B. 趨勢圖 (【改動 2】: Y 軸優化呈現最大變化) ---
+    # --- B. 趨勢圖 (優化 Y 軸呈現最大變化) ---
     st.markdown("---")
-    st.subheader("📈 過去 6 個月資產估值趨勢 (動態縮放 Y 軸)")
+    st.subheader("📈 過去 6 個月資產估值趨勢 (動態 Y 軸)")
+    
+    # 計算 Y 軸範圍以放大波動感
+    y_min = trend_data['Total_MV'].min() * 0.98
+    y_max = trend_data['Total_MV'].max() * 1.02
+    
     fig_trend = px.area(trend_data, x=trend_data.index, y='Total_MV')
     fig_trend.update_layout(
         hovermode="x unified", 
@@ -129,12 +135,13 @@ try:
         height=400, 
         yaxis=dict(
             tickformat=",.0f",
-            rangemode="normal"  # 【關鍵】: 自動縮放 Y 軸，不強制從 0 開始以放大變化量
+            range=[y_min, y_max],  # 不從 0 開始，呈現最大變化
+            fixedrange=False
         )
     )
     st.plotly_chart(fig_trend, use_container_width=True)
 
-    # --- C. 圖表區 (維持並排) ---
+    # --- C. 圓餅圖與長條圖 ---
     st.markdown("---")
     c1, c2 = st.columns(2)
     with c1:
@@ -144,14 +151,14 @@ try:
         st.subheader("📈 個股損益排行 (TWD)")
         st.plotly_chart(px.bar(df.sort_values('profit_twd'), x='profit_twd', y='name', orientation='h', color='profit_twd', color_continuous_scale='RdYlGn'), use_container_width=True)
 
-    # --- D. 完整持倉清單 (維持原樣) ---
+    # --- D. 完整持倉清單 (藍紅變色) ---
     st.markdown("---")
     st.subheader("📝 完整持倉清單")
     st.dataframe(df[['name', 'symbol', 'shares', 'current_price', 'daily_change_twd', 'profit_twd', 'roi']].style.format({
         'current_price': '{:.2f}', 'daily_change_twd': '{:,.0f}', 'profit_twd': '{:,.0f}', 'roi': '{:.2f}%'
     }).applymap(color_roi_custom, subset=['roi', 'daily_change_twd']), use_container_width=True)
 
-    # --- E. 底部統計區 (還原為一上一下垂直排列) ---
+    # --- E. 底部統計區 (垂直排列：一上一下) ---
     st.markdown("---")
     st.subheader("💰 年度個股配息統計 (NTD)")
     st.dataframe(df[df['net_div_twd'] > 0][['name', 'symbol', 'shares', 'yield_rate', 'net_div_twd']].sort_values('net_div_twd', ascending=False).style.format({'yield_rate': '{:.2f}%', 'net_div_twd': '{:,.0f}'}), use_container_width=True)
