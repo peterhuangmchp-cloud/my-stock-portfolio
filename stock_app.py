@@ -32,7 +32,7 @@ gsheet_id = st.secrets.get("GSHEET_ID")
 
 def load_data(sheet_id):
     # 建議此處 gid 改為 0 或您新表的分頁 ID
-    url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid=0"
+    url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid=601349851"
     headers = {"User-Agent": "Mozilla/5.0"}
     response = requests.get(url, headers=headers)
     data = pd.read_csv(io.StringIO(response.text))
@@ -148,3 +148,4 @@ try:
 
 except Exception as e:
     st.error(f"系統錯誤: {e}")
+
