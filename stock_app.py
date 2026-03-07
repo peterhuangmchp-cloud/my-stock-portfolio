@@ -5,10 +5,10 @@ import plotly.express as px
 import io
 import requests
 
-# --- 1. 網頁基本設定 ---
+# --- 1. 網頁基本設定 (維持原樣) ---
 st.set_page_config(page_title="全球資產損益與配息分析", layout="wide", page_icon="💰")
 
-# --- 2. 🔐 密碼保護功能 ---
+# --- 2. 🔐 密碼保護功能 (維持原樣) ---
 def check_password():
     if "authenticated" not in st.session_state:
         st.session_state["authenticated"] = False
@@ -25,7 +25,7 @@ def check_password():
 
 check_password()
 
-# --- 3. 核心數據讀取 ---
+# --- 3. 核心數據讀取 (維持原樣) ---
 st.title("📊 全球資產損益與配息看板")
 gsheet_id = st.secrets.get("GSHEET_ID")
 
@@ -55,8 +55,8 @@ def color_roi_custom(val):
 try:
     df = load_data(gsheet_id)
     
-    # --- 4. 數據同步 (確保 h52/l52 欄位存入) ---
-    with st.spinner('正在同步全球行情...'):
+    # --- 4. 數據同步 (改為 6 個月，並確保 h52/l52 存入) ---
+    with st.spinner('正在同步全球行情與 6 個月趨勢數據...'):
         price_map, prev_close_map, div_map, h52_map, l52_map = {}, {}, {}, {}, {}
         history_list = []
         
@@ -70,7 +70,8 @@ try:
             h52_map[index] = fast['year_high']
             l52_map[index] = fast['year_low']
             
-            h_data = tk.history(period="3mo", auto_adjust=False)['Close']
+            # 【改動 1】: 週期改為 6mo
+            h_data = tk.history(period="6mo", auto_adjust=False)['Close']
             h_data.index = h_data.index.tz_localize(None).normalize()
             
             rate = usd_to_twd if row['currency'].upper() == "USD" else 1
@@ -80,7 +81,7 @@ try:
             divs = tk.dividends
             div_map[sym] = divs[divs.index > (pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=365))].sum() if not divs.empty else 0.0
 
-    # --- 5. 數據運算 ---
+    # --- 5. 數據運算 (維持原樣) ---
     bond_list = ['TLT', 'SHV', 'SGOV', 'LQD']
     def process_row(row):
         idx = row.name
@@ -97,7 +98,6 @@ try:
         tax_rate = 0.7 if row['currency'].upper() == "USD" and row['symbol'] not in bond_list else 1.0
         net_div_twd = div_per_share * row['shares'] * tax_rate * rate
         yield_rate = (div_per_share / curr_price * 100) if curr_price > 0 else 0
-        
         return pd.Series([curr_price, mv_twd, profit_twd, roi, net_div_twd, yield_rate, daily_change, h52_map.get(idx, 0), l52_map.get(idx, 0)])
 
     df[['current_price', 'mv_twd', 'profit_twd', 'roi', 'net_div_twd', 'yield_rate', 'daily_change_twd', 'h52', 'l52']] = df.apply(process_row, axis=1)
@@ -119,14 +119,22 @@ try:
     m4.metric("年度預估稅後配息", f"${df['net_div_twd'].sum():,.0f}")
     m5.metric("當前匯率", f"{usd_to_twd:.2f}")
 
-    # --- B. 趨勢圖 ---
+    # --- B. 趨勢圖 (【改動 2】: Y 軸優化呈現最大變化) ---
     st.markdown("---")
-    st.subheader("📈 過去 3 個月資產估值趨勢 (對齊當前現價)")
+    st.subheader("📈 過去 6 個月資產估值趨勢 (動態縮放 Y 軸)")
     fig_trend = px.area(trend_data, x=trend_data.index, y='Total_MV')
-    fig_trend.update_layout(hovermode="x unified", template="plotly_white", height=400, yaxis=dict(tickformat=",.0f"))
+    fig_trend.update_layout(
+        hovermode="x unified", 
+        template="plotly_white", 
+        height=400, 
+        yaxis=dict(
+            tickformat=",.0f",
+            rangemode="normal"  # 【關鍵】: 自動縮放 Y 軸，不強制從 0 開始以放大變化量
+        )
+    )
     st.plotly_chart(fig_trend, use_container_width=True)
 
-    # --- C. 圖表區 (並排) ---
+    # --- C. 圖表區 (維持並排) ---
     st.markdown("---")
     c1, c2 = st.columns(2)
     with c1:
@@ -136,7 +144,7 @@ try:
         st.subheader("📈 個股損益排行 (TWD)")
         st.plotly_chart(px.bar(df.sort_values('profit_twd'), x='profit_twd', y='name', orientation='h', color='profit_twd', color_continuous_scale='RdYlGn'), use_container_width=True)
 
-    # --- D. 完整持倉清單 ---
+    # --- D. 完整持倉清單 (維持原樣) ---
     st.markdown("---")
     st.subheader("📝 完整持倉清單")
     st.dataframe(df[['name', 'symbol', 'shares', 'current_price', 'daily_change_twd', 'profit_twd', 'roi']].style.format({
@@ -145,14 +153,10 @@ try:
 
     # --- E. 底部統計區 (還原為一上一下垂直排列) ---
     st.markdown("---")
-    
-    # 上方：配息統計
     st.subheader("💰 年度個股配息統計 (NTD)")
     st.dataframe(df[df['net_div_twd'] > 0][['name', 'symbol', 'shares', 'yield_rate', 'net_div_twd']].sort_values('net_div_twd', ascending=False).style.format({'yield_rate': '{:.2f}%', 'net_div_twd': '{:,.0f}'}), use_container_width=True)
     
     st.markdown("---")
-    
-    # 下方：52 週風險監控
     st.subheader("📉 52 週高低點風險監控")
     risk_df = df[['name', 'symbol', 'current_price', 'h52', 'l52']].copy()
     risk_df['較高點跌幅 %'] = ((risk_df['current_price'] - risk_df['h52']) / risk_df['h52'] * 100)
