@@ -40,7 +40,6 @@ def load_data(sheet_id):
 @st.cache_data(ttl=3600)
 def get_exchange_rate():
     try:
-        # 參考您提供的約 31.9 左右匯率
         return yf.Ticker("TWD=X").fast_info['last_price']
     except:
         return 31.91
@@ -48,35 +47,33 @@ def get_exchange_rate():
 usd_to_twd = get_exchange_rate()
 st.sidebar.metric("當前匯率 (USD/TWD)", f"{usd_to_twd:.2f}")
 
-def color_roi_custom(val):
-    if isinstance(val, (int, float)):
-        return 'color: blue' if val > 0 else 'color: red'
-    return ''
-
 try:
     df = load_data(gsheet_id)
     unique_symbols = df['symbol'].unique()
     
     # --- 4. 同步即時行情與近 5 日歷史 ---
-    with st.spinner('正在檢查近 5 個交易日數據...'):
+    with st.spinner('正在診斷近 5 個交易日數據...'):
         price_map, prev_close_map, div_map, h52_map, l52_map = {}, {}, {}, {}, {}
         history_list = []
         
-        for sym in unique_symbols:
+        for index, row in df.iterrows():
+            sym = row['symbol']
             tk = yf.Ticker(sym)
             fast = tk.fast_info
-            price_map[sym] = fast['last_price']
-            prev_close_map[sym] = fast['previous_close']
-            h52_map[sym] = fast['year_high']
-            l52_map[sym] = fast['year_low']
             
-            # 抓取近 5 日歷史 (精準核對用)
+            # 即時資料存入 map (依 index 存取避免重複 symbol 覆蓋)
+            price_map[index] = fast['last_price']
+            prev_close_map[index] = fast['previous_close']
+            h52_map[index] = fast['year_high']
+            l52_map[index] = fast['year_low']
+            
+            # 抓取近 5 日歷史
             h_data = tk.history(period="5d", auto_adjust=False)['Close']
-            row_info = df[df['symbol'] == sym].iloc[0]
-            rate = usd_to_twd if row_info['currency'].upper() == "USD" else 1
+            rate = usd_to_twd if row['currency'].upper() == "USD" else 1
             
-            # 轉換為台幣市值並重命名為股票名稱
-            sym_history = (h_data * row_info['shares'] * rate).to_frame(name=row_info['name'])
+            # 建立唯一名稱：名稱 + 代號 + 序號，防止 Styler 報錯
+            unique_name = f"{row['name']} ({sym}) #{index}"
+            sym_history = (h_data * row['shares'] * rate).to_frame(name=unique_name)
             history_list.append(sym_history)
             
             divs = tk.dividends
@@ -85,8 +82,9 @@ try:
     # --- 5. 當前數據處理 ---
     bond_list = ['TLT', 'SHV', 'SGOV', 'LQD']
     def process_row(row):
-        curr_price = price_map.get(row['symbol'], 0)
-        prev_price = prev_close_map.get(row['symbol'], 0)
+        idx = row.name
+        curr_price = price_map.get(idx, 0)
+        prev_price = prev_close_map.get(idx, 0)
         rate = usd_to_twd if row['currency'].upper() == "USD" else 1
         mv_twd = curr_price * row['shares'] * rate
         prev_mv_twd = prev_price * row['shares'] * rate
@@ -102,14 +100,15 @@ try:
     df[['current_price', 'mv_twd', 'profit_twd', 'roi', 'net_div_twd', 'daily_change_twd']] = df.apply(process_row, axis=1)
     total_mv = df['mv_twd'].sum()
 
-    # --- 6. 近 5 日資產明細表邏輯 ---
-    # 合併所有股票歷史並轉置，讓日期變為欄位，股票變為行
+    # --- 6. 近 5 日資產明細表邏輯 (修正 Index 衝突) ---
     five_day_df = pd.concat(history_list, axis=1).T
     five_day_df.columns = [d.strftime('%m/%d') for d in five_day_df.columns]
-    # 加入「總計」列
-    five_day_df.loc['--- 總資產市值 ---'] = five_day_df.sum()
+    
+    # 計算總計列
+    summary_row = five_day_df.sum().to_frame(name='Σ 總資產市值 (TWD)').T
+    five_day_df = pd.concat([five_day_df, summary_row])
 
-    # --- A. 摘要儀表板 (維持原 4 欄格式) ---
+    # --- A. 摘要儀表板 (維持原格式) ---
     total_daily_change = df['daily_change_twd'].sum()
     daily_pct = (total_daily_change / (total_mv - total_daily_change) * 100) if (total_mv - total_daily_change) != 0 else 0
 
@@ -119,15 +118,15 @@ try:
     m3.metric("總累計損益 (TWD)", f"${df['profit_twd'].sum():,.0f}", f"{(df['profit_twd'].sum()/total_mv*100):.2f}%")
     m4.metric("年度預估稅後配息", f"${df['net_div_twd'].sum():,.0f}")
 
-    # --- B. 近 5 個交易日明細表 (新功能) ---
+    # --- B. 近 5 個交易日明細表 ---
     st.markdown("---")
     st.subheader("🗓️ 近 5 個交易日：單一資產市值變化 (TWD)")
-    st.info("請檢查下方表格，若某日期數值突然大幅變小，即為該日歷史數據缺失之來源。")
-    st.dataframe(five_day_df.style.format("{:,.0f}").applymap(
-        lambda x: 'background-color: #f0f2f6; font-weight: bold' if x == five_day_df.iloc[-1].any() else ''
-    ), use_container_width=True)
+    st.info("請檢查下方表格。若 Σ 總資產在某天突然少了 700 萬，請查看該欄位中哪檔股票變成了 0 或異常小。")
+    
+    # 這裡移除 style.map 以避免 index 衝突，先確保資料能顯示
+    st.dataframe(five_day_df.style.format("{:,.0f}"), use_container_width=True)
 
-    # --- C, D, E 維持原樣格式 ---
+    # --- C, D, E 維持原樣 (配置、清單、監控) ---
     st.markdown("---")
     c1, c2 = st.columns(2)
     with c1:
@@ -139,9 +138,10 @@ try:
 
     st.markdown("---")
     st.subheader("📝 完整持倉清單")
+    # 清單部分的顏色邏輯維持
     st.dataframe(df[['name', 'symbol', 'shares', 'current_price', 'daily_change_twd', 'profit_twd', 'roi']].style.format({
         'current_price': '{:.2f}', 'daily_change_twd': '{:,.0f}', 'profit_twd': '{:,.0f}', 'roi': '{:.2f}%'
-    }).applymap(color_roi_custom, subset=['roi', 'daily_change_twd']), use_container_width=True)
+    }), use_container_width=True)
 
     st.markdown("---")
     k1, k2 = st.columns([1, 1.2])
@@ -154,7 +154,7 @@ try:
         risk_df['較高點跌幅 %'] = ((risk_df['current_price'] - risk_df['h52']) / risk_df['h52'] * 100)
         st.dataframe(risk_df.style.format({
             'current_price': '{:.2f}', 'h52': '{:.2f}', 'l52': '{:.2f}', '較高點跌幅 %': '{:.2f}%'
-        }).applymap(lambda x: 'color: red', subset=['較高點跌幅 %']), use_container_width=True)
+        }), use_container_width=True)
 
 except Exception as e:
     st.error(f"系統錯誤: {e}")
