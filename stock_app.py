@@ -4,6 +4,7 @@ import pandas as pd
 import plotly.express as px
 import io
 import requests
+import time
 
 # --- 1. 網頁基本設定 ---
 st.set_page_config(page_title="全球資產損益與配息分析", layout="wide", page_icon="💰")
@@ -55,8 +56,8 @@ def color_roi_custom(val):
 try:
     df = load_data(gsheet_id)
     
-    # --- 4. 數據同步 (強化：精準對齊官方 Previous Close) ---
-    with st.spinner('正在同步 Yahoo Finance 官方收盤行情...'):
+    # --- 4. 數據同步 (抗封鎖 + 精準收盤邏輯) ---
+    with st.spinner('正在從 Yahoo Finance 抓取最新行情 (請稍候)...'):
         price_map, prev_close_map, div_map, h52_map, l52_map = {}, {}, {}, {}, {}
         history_list = []
         
@@ -64,32 +65,50 @@ try:
             sym = row['symbol']
             tk = yf.Ticker(sym)
             
-            # 【核心修正】從 info 抓取最原始的 Previous Close
-            # 這能確保 AVGO 拿到 309.86
-            info = tk.info
-            p_close = info.get('previousClose', 0)
-            curr_p = info.get('currentPrice', info.get('regularMarketPrice', 0))
-            
-            # 如果 info 抓不到，才用 history 備援
-            if p_close == 0 or curr_p == 0:
-                h_data_full = tk.history(period="5d", auto_adjust=False, prepost=False)
-                curr_p = h_data_full['Close'].iloc[-1]
-                p_close = h_data_full['Close'].iloc[-2]
+            # 使用 fast_info (輕量，不易封鎖)
+            try:
+                f_info = tk.fast_info
+                curr_p = f_info['last_price']
+                p_close = f_info['previous_close']
+                h52 = f_info['year_high']
+                l52 = f_info['year_low']
+            except:
+                # 備援方案：若 fast_info 失敗，改用 5d 歷史數據
+                h_data = tk.history(period="5d", auto_adjust=False, prepost=False)
+                curr_p = h_data['Close'].iloc[-1]
+                p_close = h_data['Close'].iloc[-2]
+                h52, l52 = curr_p, curr_p
+
+            # 特別校正：AVGO 的 Previous Close 容易被盤後數據污染
+            # 這裡強制從 12mo 歷史數據抓取最後一個正規交易日的收盤價
+            h_12m_full = tk.history(period="12mo", auto_adjust=False, prepost=False)
+            if len(h_12m_full) >= 2:
+                # 正規交易的收盤價 (322.51)
+                curr_p = h_12m_full['Close'].iloc[-1]
+                # 正規交易的昨收價 (309.86)
+                p_close = h_12m_full['Close'].iloc[-2]
 
             price_map[index] = curr_p
             prev_close_map[index] = p_close
-            h52_map[index] = info.get('fiftyTwoWeekHigh', 0)
-            l52_map[index] = info.get('fiftyTwoWeekLow', 0)
+            h52_map[index] = h52
+            l52_map[index] = l52
             
-            # 趨勢圖數據 (維持 12 個月)
-            h_12m = tk.history(period="12mo", auto_adjust=False)['Close']
+            # 趨勢圖數據
+            h_12m = h_12m_full['Close']
             h_12m.index = h_12m.index.tz_localize(None).normalize()
             rate = usd_to_twd if row['currency'].upper() == "USD" else 1
             sym_history = (h_12m * row['shares'] * rate).to_frame(name=sym)
             history_list.append(sym_history)
             
-            # 股息
-            div_map[sym] = info.get('trailingAnnualDividendYield', 0) * curr_p if 'trailingAnnualDividendYield' in info else 0
+            # 股息 (不再使用 tk.info，改用 tk.dividends 避開限制)
+            try:
+                divs = tk.dividends
+                div_map[sym] = divs[divs.index > (pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=365))].sum() if not divs.empty else 0.0
+            except:
+                div_map[sym] = 0.0
+            
+            # 短暫休眠 0.1 秒，降低 API 壓力
+            time.sleep(0.1)
 
     # --- 5. 數據運算 ---
     bond_list = ['TLT', 'SHV', 'SGOV', 'LQD']
@@ -104,7 +123,6 @@ try:
         cost_twd = row['cost'] * row['shares'] * rate
         
         daily_change = mv_twd - prev_mv_twd
-        # 關鍵驗算：(322.51 - 309.86) / 309.86 = 4.08%
         daily_pct = ((curr_price - prev_price) / prev_price * 100) if prev_price > 0 else 0
         
         profit_twd = mv_twd - cost_twd
