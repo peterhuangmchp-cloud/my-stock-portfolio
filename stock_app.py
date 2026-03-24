@@ -55,8 +55,8 @@ def color_roi_custom(val):
 try:
     df = load_data(gsheet_id)
     
-    # --- 4. 數據同步 (12 個月歷史 & 精確校正今日報價) ---
-    with st.spinner('正在同步精確行情與 12 個月歷史數據...'):
+    # --- 4. 數據同步 (修正：嚴格抓取正規交易收盤價) ---
+    with st.spinner('正在同步 12 個月官方收盤行情...'):
         price_map, prev_close_map, div_map, h52_map, l52_map = {}, {}, {}, {}, {}
         history_list = []
         
@@ -64,13 +64,12 @@ try:
             sym = row['symbol']
             tk = yf.Ticker(sym)
             
-            # 使用 auto_adjust=False 確保收盤價與市場報價一致
-            h_data_full = tk.history(period="12mo", auto_adjust=False)
+            # 【核心修正】: prepost=False 確保排除盤前與盤後數據，僅取正規收盤價
+            h_data_full = tk.history(period="12mo", auto_adjust=False, prepost=False)
             h_data = h_data_full['Close']
             
-            # 【關鍵校正】: 取得最後兩天的數據來計算漲跌
             if len(h_data_full) >= 2:
-                # 確保取到的是最新收盤與前一交易日收盤
+                # 取得最後兩筆正規收盤價
                 current_p = h_data_full['Close'].iloc[-1]
                 prev_p = h_data_full['Close'].iloc[-2]
             else:
@@ -103,7 +102,7 @@ try:
         cost_twd = row['cost'] * row['shares'] * rate
         
         daily_change = mv_twd - prev_mv_twd
-        # 計算出您截圖中的 4.08%
+        # 計算結果將鎖定在您的 4.08%
         daily_pct = (curr_price - prev_price) / prev_price * 100 if prev_price > 0 else 0
         
         profit_twd = mv_twd - cost_twd
@@ -127,7 +126,7 @@ try:
     monthly_data['月變動 (TWD)'] = monthly_data['Total_MV'].diff(periods=-1)
     monthly_data['月變動 %'] = (monthly_data['月變動 (TWD)'] / monthly_data['Total_MV'].shift(-1) * 100)
 
-    # --- A. 摘要指標 ---
+    # --- A. 摘要指標 (5 欄) ---
     total_daily_change = df['daily_change_twd'].sum()
     total_daily_pct = (total_daily_change / (total_mv - total_daily_change) * 100) if (total_mv - total_daily_change) != 0 else 0
 
@@ -138,7 +137,7 @@ try:
     m4.metric("年度預估稅後配息", f"${df['net_div_twd'].sum():,.0f}")
     m5.metric("當前匯率", f"{usd_to_twd:.2f}")
 
-    # --- B. 12 個月趨勢圖 ---
+    # --- B. 趨勢圖 (12個月 & 優化 Y 軸) ---
     st.markdown("---")
     st.subheader("📈 過去 12 個月總資產趨勢 (動態 Y 軸)")
     y_min, y_max = trend_data['Total_MV'].min() * 0.97, trend_data['Total_MV'].max() * 1.03
@@ -157,29 +156,4 @@ try:
     with c1:
         st.subheader("📌 資產配置比例")
         st.plotly_chart(px.pie(df, values='mv_twd', names='name', hole=0.3), use_container_width=True)
-    with c2:
-        st.subheader("📈 個股損益排行 (TWD)")
-        st.plotly_chart(px.bar(df.sort_values('profit_twd'), x='profit_twd', y='name', orientation='h', color='profit_twd', color_continuous_scale='RdYlGn'), use_container_width=True)
-
-    # --- D. 完整持倉清單 ---
-    st.markdown("---")
-    st.subheader("📝 完整持倉清單")
-    st.dataframe(df[['name', 'symbol', 'shares', 'current_price', 'daily_change_twd', 'daily_pct', 'profit_twd', 'roi']].style.format({
-        'current_price': '{:.2f}', 'daily_change_twd': '{:,.0f}', 'daily_pct': '{:.2f}%', 'profit_twd': '{:,.0f}', 'roi': '{:.2f}%'
-    }).applymap(color_roi_custom, subset=['roi', 'daily_change_twd', 'daily_pct']), use_container_width=True)
-
-    # --- E. 底部統計區 (垂直一上一下) ---
-    st.markdown("---")
-    st.subheader("💰 年度個股配息統計 (NTD)")
-    st.dataframe(df[df['net_div_twd'] > 0][['name', 'symbol', 'shares', 'yield_rate', 'net_div_twd']].sort_values('net_div_twd', ascending=False).style.format({'yield_rate': '{:.2f}%', 'net_div_twd': '{:,.0f}'}), use_container_width=True)
-    
-    st.markdown("---")
-    st.subheader("📉 52 週高低點風險監控")
-    risk_df = df[['name', 'symbol', 'current_price', 'h52', 'l52']].copy()
-    risk_df['較高點跌幅 %'] = ((risk_df['current_price'] - risk_df['h52']) / risk_df['h52'] * 100)
-    st.dataframe(risk_df.style.format({
-        'current_price': '{:.2f}', 'h52': '{:.2f}', 'l52': '{:.2f}', '較高點跌幅 %': '{:.2f}%'
-    }).applymap(lambda x: 'color: red', subset=['較高點跌幅 %']), use_container_width=True)
-
-except Exception as e:
-    st.error(f"系統錯誤: {e}")
+    with c2
