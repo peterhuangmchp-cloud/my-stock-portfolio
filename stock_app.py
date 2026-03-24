@@ -5,10 +5,10 @@ import plotly.express as px
 import io
 import requests
 
-# --- 1. 網頁基本設定 (原始版) ---
+# --- 1. 網頁基本設定 (維持原樣) ---
 st.set_page_config(page_title="全球資產損益與配息分析", layout="wide", page_icon="💰")
 
-# --- 2. 🔐 密碼保護功能 (原始版) ---
+# --- 2. 🔐 密碼保護功能 ---
 def check_password():
     if "authenticated" not in st.session_state:
         st.session_state["authenticated"] = False
@@ -30,7 +30,7 @@ st.title("📊 全球資產損益與配息看板")
 gsheet_id = st.secrets.get("GSHEET_ID")
 
 def load_data(sheet_id):
-    url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid=601349851"
+    url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid=0"
     headers = {"User-Agent": "Mozilla/5.0"}
     response = requests.get(url, headers=headers)
     data = pd.read_csv(io.StringIO(response.text))
@@ -55,8 +55,8 @@ def color_roi_custom(val):
 try:
     df = load_data(gsheet_id)
     
-    # --- 4. 數據同步 (改為 12 個月) ---
-    with st.spinner('正在同步 12 個月行情數據...'):
+    # --- 4. 數據同步 (12 個月) ---
+    with st.spinner('正在同步行情與 12 個月歷史數據...'):
         price_map, prev_close_map, div_map, h52_map, l52_map = {}, {}, {}, {}, {}
         history_list = []
         
@@ -70,7 +70,6 @@ try:
             h52_map[index] = fast['year_high']
             l52_map[index] = fast['year_low']
             
-            # 抓取 12 個月歷史數據
             h_data = tk.history(period="12mo", auto_adjust=False)['Close']
             h_data.index = h_data.index.tz_localize(None).normalize()
             
@@ -81,59 +80,64 @@ try:
             divs = tk.dividends
             div_map[sym] = divs[divs.index > (pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=365))].sum() if not divs.empty else 0.0
 
-    # --- 5. 數據運算 ---
+    # --- 5. 數據運算 (新增每日漲跌百分比) ---
     bond_list = ['TLT', 'SHV', 'SGOV', 'LQD']
     def process_row(row):
         idx = row.name
         curr_price = price_map.get(idx, 0)
         prev_price = prev_close_map.get(idx, 0)
         rate = usd_to_twd if row['currency'].upper() == "USD" else 1
+        
         mv_twd = curr_price * row['shares'] * rate
         prev_mv_twd = prev_price * row['shares'] * rate
         cost_twd = row['cost'] * row['shares'] * rate
+        
+        # 每日變動金額與百分比
         daily_change = mv_twd - prev_mv_twd
+        daily_pct = (curr_price - prev_price) / prev_price * 100 if prev_price > 0 else 0
+        
         profit_twd = mv_twd - cost_twd
         roi = (profit_twd / cost_twd * 100) if cost_twd > 0 else 0
+        
         div_per_share = div_map.get(row['symbol'], 0)
         tax_rate = 0.7 if row['currency'].upper() == "USD" and row['symbol'] not in bond_list else 1.0
         net_div_twd = div_per_share * row['shares'] * tax_rate * rate
         yield_rate = (div_per_share / curr_price * 100) if curr_price > 0 else 0
-        return pd.Series([curr_price, mv_twd, profit_twd, roi, net_div_twd, yield_rate, daily_change, h52_map.get(idx, 0), l52_map.get(idx, 0)])
+        
+        return pd.Series([curr_price, mv_twd, profit_twd, roi, net_div_twd, yield_rate, daily_change, daily_pct, h52_map.get(idx, 0), l52_map.get(idx, 0)])
 
-    df[['current_price', 'mv_twd', 'profit_twd', 'roi', 'net_div_twd', 'yield_rate', 'daily_change_twd', 'h52', 'l52']] = df.apply(process_row, axis=1)
+    # 更新欄位定義
+    df[['current_price', 'mv_twd', 'profit_twd', 'roi', 'net_div_twd', 'yield_rate', 'daily_change_twd', 'daily_pct', 'h52', 'l52']] = df.apply(process_row, axis=1)
     total_mv = df['mv_twd'].sum()
 
-    # --- 6. 趨勢圖與月變化表數據處理 ---
+    # --- 6. 趨勢圖與月表處理 ---
     history_combined = pd.concat(history_list, axis=1).interpolate(method='linear').ffill().bfill()
     trend_data = history_combined.sum(axis=1).to_frame(name='Total_MV')
     trend_data.iloc[-1] = total_mv 
-
-    # 生成月變化表 (取每月最後一個交易日)
     monthly_data = trend_data.resample('M').last().sort_index(ascending=False)
     monthly_data['月變動 (TWD)'] = monthly_data['Total_MV'].diff(periods=-1)
     monthly_data['月變動 %'] = (monthly_data['月變動 (TWD)'] / monthly_data['Total_MV'].shift(-1) * 100)
 
-    # --- A. 摘要指標 (5 欄) ---
+    # --- A. 摘要指標 ---
     total_daily_change = df['daily_change_twd'].sum()
-    daily_pct = (total_daily_change / (total_mv - total_daily_change) * 100) if (total_mv - total_daily_change) != 0 else 0
+    total_daily_pct = (total_daily_change / (total_mv - total_daily_change) * 100) if (total_mv - total_daily_change) != 0 else 0
 
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("總資產市值 (TWD)", f"${total_mv:,.0f}")
-    m2.metric("今日資產變動", f"${total_daily_change:,.0f}", f"{daily_pct:.2f}%")
+    m2.metric("今日資產變動", f"${total_daily_change:,.0f}", f"{total_daily_pct:.2f}%")
     m3.metric("總累計損益 (TWD)", f"${df['profit_twd'].sum():,.0f}", f"{(df['profit_twd'].sum()/total_mv*100):.2f}%")
     m4.metric("年度預估稅後配息", f"${df['net_div_twd'].sum():,.0f}")
     m5.metric("當前匯率", f"{usd_to_twd:.2f}")
 
-    # --- B. 趨勢圖 (12 個月 & Y 軸優化) ---
+    # --- B. 12 個月趨勢圖 ---
     st.markdown("---")
     st.subheader("📈 過去 12 個月總資產趨勢 (動態 Y 軸)")
-    y_min = trend_data['Total_MV'].min() * 0.97
-    y_max = trend_data['Total_MV'].max() * 1.03
+    y_min, y_max = trend_data['Total_MV'].min() * 0.97, trend_data['Total_MV'].max() * 1.03
     fig_trend = px.area(trend_data, x=trend_data.index, y='Total_MV')
     fig_trend.update_layout(hovermode="x unified", template="plotly_white", height=400, yaxis=dict(tickformat=",.0f", range=[y_min, y_max]))
     st.plotly_chart(fig_trend, use_container_width=True)
 
-    # --- 新增內容：12 個月總資產變化表 ---
+    # --- 12 個月月變化表 ---
     st.subheader("🗓️ 過去 12 個月總資產變化表")
     st.dataframe(monthly_data.style.format({
         'Total_MV': '{:,.0f}', '月變動 (TWD)': '{:,.0f}', '月變動 %': '{:.2f}%'
@@ -149,14 +153,14 @@ try:
         st.subheader("📈 個股損益排行 (TWD)")
         st.plotly_chart(px.bar(df.sort_values('profit_twd'), x='profit_twd', y='name', orientation='h', color='profit_twd', color_continuous_scale='RdYlGn'), use_container_width=True)
 
-    # --- D. 完整持倉清單 ---
+    # --- D. 完整持倉清單 (【修正】加入每日漲跌 %) ---
     st.markdown("---")
     st.subheader("📝 完整持倉清單")
-    st.dataframe(df[['name', 'symbol', 'shares', 'current_price', 'daily_change_twd', 'profit_twd', 'roi']].style.format({
-        'current_price': '{:.2f}', 'daily_change_twd': '{:,.0f}', 'profit_twd': '{:,.0f}', 'roi': '{:.2f}%'
-    }).applymap(color_roi_custom, subset=['roi', 'daily_change_twd']), use_container_width=True)
+    st.dataframe(df[['name', 'symbol', 'shares', 'current_price', 'daily_change_twd', 'daily_pct', 'profit_twd', 'roi']].style.format({
+        'current_price': '{:.2f}', 'daily_change_twd': '{:,.0f}', 'daily_pct': '{:.2f}%', 'profit_twd': '{:,.0f}', 'roi': '{:.2f}%'
+    }).applymap(color_roi_custom, subset=['roi', 'daily_change_twd', 'daily_pct']), use_container_width=True)
 
-    # --- E. 底部統計區 (一上一下) ---
+    # --- E. 底部統計區 (垂直一上一下) ---
     st.markdown("---")
     st.subheader("💰 年度個股配息統計 (NTD)")
     st.dataframe(df[df['net_div_twd'] > 0][['name', 'symbol', 'shares', 'yield_rate', 'net_div_twd']].sort_values('net_div_twd', ascending=False).style.format({'yield_rate': '{:.2f}%', 'net_div_twd': '{:,.0f}'}), use_container_width=True)
