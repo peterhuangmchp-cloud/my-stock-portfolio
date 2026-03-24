@@ -41,6 +41,7 @@ def load_data(sheet_id):
 @st.cache_data(ttl=3600)
 def get_exchange_rate():
     try:
+        # 使用輕量級 fast_info 獲取匯率
         return yf.Ticker("TWD=X").fast_info['last_price']
     except:
         return 32.5
@@ -56,8 +57,8 @@ def color_roi_custom(val):
 try:
     df = load_data(gsheet_id)
     
-    # --- 4. 數據同步 (抗封鎖 + 精準收盤邏輯) ---
-    with st.spinner('正在從 Yahoo Finance 抓取最新行情 (請稍候)...'):
+    # --- 4. 數據同步 (抗封鎖 + 強制對齊正規交易價) ---
+    with st.spinner('正在同步全球行情數據 (已優化抗封鎖模式)...'):
         price_map, prev_close_map, div_map, h52_map, l52_map = {}, {}, {}, {}, {}
         history_list = []
         
@@ -65,50 +66,40 @@ try:
             sym = row['symbol']
             tk = yf.Ticker(sym)
             
-            # 使用 fast_info (輕量，不易封鎖)
-            try:
-                f_info = tk.fast_info
-                curr_p = f_info['last_price']
-                p_close = f_info['previous_close']
-                h52 = f_info['year_high']
-                l52 = f_info['year_low']
-            except:
-                # 備援方案：若 fast_info 失敗，改用 5d 歷史數據
-                h_data = tk.history(period="5d", auto_adjust=False, prepost=False)
-                curr_p = h_data['Close'].iloc[-1]
-                p_close = h_data['Close'].iloc[-2]
-                h52, l52 = curr_p, curr_p
-
-            # 特別校正：AVGO 的 Previous Close 容易被盤後數據污染
-            # 這裡強制從 12mo 歷史數據抓取最後一個正規交易日的收盤價
-            h_12m_full = tk.history(period="12mo", auto_adjust=False, prepost=False)
-            if len(h_12m_full) >= 2:
-                # 正規交易的收盤價 (322.51)
-                curr_p = h_12m_full['Close'].iloc[-1]
-                # 正規交易的昨收價 (309.86)
-                p_close = h_12m_full['Close'].iloc[-2]
+            # 【關鍵】使用 history 取代 info，避免 Rate Limit
+            # prepost=False 確保不被盤後交易(After-hours)干擾
+            h_data_short = tk.history(period="5d", auto_adjust=False, prepost=False)
+            
+            if len(h_data_short) >= 2:
+                # 取得最後兩個交易日的正規收盤價
+                curr_p = h_data_short['Close'].iloc[-1]
+                p_close = h_data_short['Close'].iloc[-2]
+            else:
+                # 備援：若數據不足則使用 fast_info
+                curr_p = tk.fast_info['last_price']
+                p_close = tk.fast_info['previous_close']
 
             price_map[index] = curr_p
             prev_close_map[index] = p_close
-            h52_map[index] = h52
-            l52_map[index] = l52
+            h52_map[index] = tk.fast_info['year_high']
+            l52_map[index] = tk.fast_info['year_low']
             
-            # 趨勢圖數據
-            h_12m = h_12m_full['Close']
+            # 歷史圖表改用 12 個月數據
+            h_12m = tk.history(period="12mo", auto_adjust=False)['Close']
             h_12m.index = h_12m.index.tz_localize(None).normalize()
             rate = usd_to_twd if row['currency'].upper() == "USD" else 1
             sym_history = (h_12m * row['shares'] * rate).to_frame(name=sym)
             history_list.append(sym_history)
             
-            # 股息 (不再使用 tk.info，改用 tk.dividends 避開限制)
+            # 股息從 dividends 抓取，避開 info
             try:
                 divs = tk.dividends
                 div_map[sym] = divs[divs.index > (pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=365))].sum() if not divs.empty else 0.0
             except:
                 div_map[sym] = 0.0
             
-            # 短暫休眠 0.1 秒，降低 API 壓力
-            time.sleep(0.1)
+            # 加入微小延遲避免連線過快
+            time.sleep(0.05)
 
     # --- 5. 數據運算 ---
     bond_list = ['TLT', 'SHV', 'SGOV', 'LQD']
@@ -123,6 +114,7 @@ try:
         cost_twd = row['cost'] * row['shares'] * rate
         
         daily_change = mv_twd - prev_mv_twd
+        # 強制計算：(322.51 - 309.86) / 309.86 = 4.08%
         daily_pct = ((curr_price - prev_price) / prev_price * 100) if prev_price > 0 else 0
         
         profit_twd = mv_twd - cost_twd
@@ -180,7 +172,7 @@ try:
         st.subheader("📈 個股損益排行 (TWD)")
         st.plotly_chart(px.bar(df.sort_values('profit_twd'), x='profit_twd', y='name', orientation='h', color='profit_twd', color_continuous_scale='RdYlGn'), use_container_width=True)
 
-    # --- D. 完整持倉清單 ---
+    # --- D. 完整持倉清單 (包含校準後的昨收價) ---
     st.markdown("---")
     st.subheader("📝 完整持倉清單")
     st.dataframe(df[['name', 'symbol', 'shares', 'current_price', 'prev_close', 'daily_change_twd', 'daily_pct', 'profit_twd', 'roi']].style.format({
