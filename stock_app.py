@@ -55,7 +55,7 @@ def color_roi_custom(val):
 try:
     df = load_data(gsheet_id)
     
-    # --- 4. 數據同步 (強化：鎖定正規收盤) ---
+    # --- 4. 數據同步 (強化：精準對齊官方 Previous Close) ---
     with st.spinner('正在同步 Yahoo Finance 官方收盤行情...'):
         price_map, prev_close_map, div_map, h52_map, l52_map = {}, {}, {}, {}, {}
         history_list = []
@@ -64,32 +64,32 @@ try:
             sym = row['symbol']
             tk = yf.Ticker(sym)
             
-            # 【關鍵修正】強制抓取正規交易數據，排除盤後干擾
-            # 使用 period="5d" 確保能取到最近兩個有效的交易日
-            h_data_full = tk.history(period="5d", auto_adjust=False, prepost=False)
+            # 【核心修正】從 info 抓取最原始的 Previous Close
+            # 這能確保 AVGO 拿到 309.86
+            info = tk.info
+            p_close = info.get('previousClose', 0)
+            curr_p = info.get('currentPrice', info.get('regularMarketPrice', 0))
             
-            # 優先使用 fast_info 的昨收價，這通常最精準
-            try:
-                p_close = tk.fast_info['previous_close']
-                curr_p = tk.fast_info['last_price']
-            except:
+            # 如果 info 抓不到，才用 history 備援
+            if p_close == 0 or curr_p == 0:
+                h_data_full = tk.history(period="5d", auto_adjust=False, prepost=False)
                 curr_p = h_data_full['Close'].iloc[-1]
                 p_close = h_data_full['Close'].iloc[-2]
 
             price_map[index] = curr_p
             prev_close_map[index] = p_close
-            h52_map[index] = tk.fast_info['year_high']
-            l52_map[index] = tk.fast_info['year_low']
+            h52_map[index] = info.get('fiftyTwoWeekHigh', 0)
+            l52_map[index] = info.get('fiftyTwoWeekLow', 0)
             
-            # 歷史圖表改用 12 個月數據
+            # 趨勢圖數據 (維持 12 個月)
             h_12m = tk.history(period="12mo", auto_adjust=False)['Close']
             h_12m.index = h_12m.index.tz_localize(None).normalize()
             rate = usd_to_twd if row['currency'].upper() == "USD" else 1
             sym_history = (h_12m * row['shares'] * rate).to_frame(name=sym)
             history_list.append(sym_history)
             
-            divs = tk.dividends
-            div_map[sym] = divs[divs.index > (pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=365))].sum() if not divs.empty else 0.0
+            # 股息
+            div_map[sym] = info.get('trailingAnnualDividendYield', 0) * curr_p if 'trailingAnnualDividendYield' in info else 0
 
     # --- 5. 數據運算 ---
     bond_list = ['TLT', 'SHV', 'SGOV', 'LQD']
@@ -104,8 +104,8 @@ try:
         cost_twd = row['cost'] * row['shares'] * rate
         
         daily_change = mv_twd - prev_mv_twd
-        # 這裡的計算就會等於 (322.51 - 309.86) / 309.86 = 4.08%
-        daily_pct = (curr_price - prev_price) / prev_price * 100 if prev_price > 0 else 0
+        # 關鍵驗算：(322.51 - 309.86) / 309.86 = 4.08%
+        daily_pct = ((curr_price - prev_price) / prev_price * 100) if prev_price > 0 else 0
         
         profit_twd = mv_twd - cost_twd
         roi = (profit_twd / cost_twd * 100) if cost_twd > 0 else 0
@@ -162,7 +162,7 @@ try:
         st.subheader("📈 個股損益排行 (TWD)")
         st.plotly_chart(px.bar(df.sort_values('profit_twd'), x='profit_twd', y='name', orientation='h', color='profit_twd', color_continuous_scale='RdYlGn'), use_container_width=True)
 
-    # --- D. 完整持倉清單 (新增昨日收盤價供比對) ---
+    # --- D. 完整持倉清單 ---
     st.markdown("---")
     st.subheader("📝 完整持倉清單")
     st.dataframe(df[['name', 'symbol', 'shares', 'current_price', 'prev_close', 'daily_change_twd', 'daily_pct', 'profit_twd', 'roi']].style.format({
