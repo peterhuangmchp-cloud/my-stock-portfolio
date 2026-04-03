@@ -6,7 +6,6 @@ import matplotlib.dates as mdates
 from datetime import datetime
 import requests
 from bs4 import BeautifulSoup
-import time
 
 # --- 1. 頁面設定 ---
 st.set_page_config(page_title="Historical Drawdown Analysis", layout="wide")
@@ -15,6 +14,7 @@ st.set_page_config(page_title="Historical Drawdown Analysis", layout="wide")
 def get_live_quote(ticker):
     try:
         t_up = ticker.upper()
+        # 判斷市場後綴
         market = ":TPE" if ".TW" in t_up else ":TWO" if ".TWO" in t_up else ":NASDAQ"
         clean_ticker = t_up.replace(".TW", "").replace(".TWO", "")
         url = f"https://www.google.com/finance/quote/{clean_ticker}{market}"
@@ -28,8 +28,8 @@ def get_live_quote(ticker):
         return None
 
 # --- 3. 介面與參數 ---
-st.title("📉 Drawdown Analysis & Market Events")
-st.markdown("分析基準：**前 52 週最高點**。陰影區域標註歷史重大政經事件。")
+st.title("📉 Drawdown Analysis & Geopolitical Events")
+st.markdown("分析基準：**前 52 週最高點**。陰影區域標註歷史重大政經與地緣政治事件。")
 
 with st.sidebar:
     st.header("Settings")
@@ -75,27 +75,28 @@ if ticker:
                 ax.plot(dd.index, dd, color='#d62728', lw=1.2, alpha=0.9, label='Drawdown %')
                 ax.fill_between(dd.index, 0, dd, color='#d62728', alpha=0.08)
 
-                # 定義重大事件 (包含 2025 川普關稅)
+                # 重大歷史事件 (包含 2025 關稅與 2026 美伊衝突)
                 crash_events = [
                     {"name": "2008 Financial Crisis", "start": "2008-01-01", "end": "2009-06-30", "color": "gray"},
                     {"name": "2018 Trade War", "start": "2018-06-01", "end": "2018-12-31", "color": "orange"},
                     {"name": "2020 COVID-19", "start": "2020-02-01", "end": "2020-04-30", "color": "green"},
                     {"name": "2022 Rate Hikes", "start": "2022-01-01", "end": "2022-12-31", "color": "purple"},
-                    {"name": "2025 Trump Tariff", "start": "2025-01-20", "end": "2025-05-30", "color": "brown"}
+                    {"name": "2025 Trump Tariff", "start": "2025-01-20", "end": "2025-05-30", "color": "brown"},
+                    {"name": "2026 US-Iran Conflict", "start": "2026-01-15", "end": "2026-04-03", "color": "black"}
                 ]
 
                 # 標註事件區間
                 for event in crash_events:
                     ev_s = pd.to_datetime(event["start"])
                     ev_e = pd.to_datetime(event["end"])
-                    # 只在圖表範圍內的事件才標註
+                    # 只在圖表時間範圍內的事件才標註
                     if ev_s > dd.index[0]:
                         ax.axvspan(ev_s, ev_e, color=event["color"], alpha=0.12, label=event["name"])
-                        # 在區間上方垂直標註名稱
+                        # 標註名稱 (垂直旋轉避免重疊)
                         ax.text(ev_s + (ev_e - ev_s)/2, 5, event["name"], 
                                 rotation=90, ha='center', va='bottom', fontsize=8, color='#666666')
 
-                # 標註年度最低點
+                # 標註年度最低點 (修正 map 問題)
                 yearly_mins = dd.groupby(dd.index.year).idxmin()
                 for d in yearly_mins:
                     val = dd.loc[d]
@@ -103,16 +104,16 @@ if ticker:
                         ax.scatter(d, val, color='red', s=20, zorder=5)
                         ax.text(d, val-3, f"{val:.1f}%", fontsize=9, ha='center', fontweight='bold')
 
-                # 圖表格式美化
+                # 圖表美化
                 ax.set_title(f"{ticker} Historical Drawdown & Crisis Events", fontsize=16, pad=30)
                 ax.set_ylabel("Drawdown (%)")
                 ax.axhline(0, color='black', lw=1)
-                ax.axhline(-20, color='black', ls='--', alpha=0.5) # 技術面熊市線
-                ax.set_ylim(dd.min() - 15, 20) # 預留空間給文字標籤
+                ax.axhline(-20, color='black', ls='--', alpha=0.5) # 技術面熊市基準
+                ax.set_ylim(dd.min() - 18, 22) # 預留上方空間
                 ax.xaxis.set_major_locator(mdates.YearLocator(2))
                 ax.grid(True, linestyle=':', alpha=0.3)
                 
-                # 圖例處理 (避免重複標籤)
+                # 圖例
                 handles, labels = ax.get_legend_handles_labels()
                 by_label = dict(zip(labels, handles))
                 ax.legend(by_label.values(), by_label.keys(), loc='lower left', fontsize=8, ncol=3)
@@ -120,8 +121,8 @@ if ticker:
                 st.pyplot(fig)
 
                 # 5. 數據預覽
-                with st.expander("View Raw Data (Recent 60 Days)"):
-                    st.table(dd.tail(60).sort_index(ascending=False))
+                with st.expander("Recent Data Preview (Daily Drawdown)"):
+                    st.dataframe(dd.tail(100).sort_index(ascending=False).to_frame(name="Drawdown %").style.format("{:.2f}%"))
 
         except Exception as e:
             st.error(f"Error during analysis: {e}")
