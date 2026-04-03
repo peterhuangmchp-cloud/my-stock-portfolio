@@ -5,6 +5,7 @@ import plotly.express as px
 import io
 import requests
 import time
+from datetime import datetime
 
 # --- 1. 網頁基本設定 ---
 st.set_page_config(page_title="全球資產損益與配息分析", layout="wide", page_icon="💰")
@@ -31,7 +32,8 @@ st.title("📊 全球資產損益與配息看板")
 gsheet_id = st.secrets.get("GSHEET_ID")
 
 def load_data(sheet_id):
-    url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid=601349851"
+    # 修正：確保 gid=0 且路徑正確
+    url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid=0"
     headers = {"User-Agent": "Mozilla/5.0"}
     response = requests.get(url, headers=headers)
     data = pd.read_csv(io.StringIO(response.text))
@@ -41,7 +43,6 @@ def load_data(sheet_id):
 @st.cache_data(ttl=3600)
 def get_exchange_rate():
     try:
-        # 使用輕量級 fast_info 獲取匯率
         return yf.Ticker("TWD=X").fast_info['last_price']
     except:
         return 32.5
@@ -57,7 +58,7 @@ def color_roi_custom(val):
 try:
     df = load_data(gsheet_id)
     
-    # --- 4. 數據同步 (抗封鎖 + 強制對齊正規交易價) ---
+    # --- 4. 數據同步 ---
     with st.spinner('正在同步全球行情數據 (已優化抗封鎖模式)...'):
         price_map, prev_close_map, div_map, h52_map, l52_map = {}, {}, {}, {}, {}
         history_list = []
@@ -66,16 +67,13 @@ try:
             sym = row['symbol']
             tk = yf.Ticker(sym)
             
-            # 【關鍵】使用 history 取代 info，避免 Rate Limit
-            # prepost=False 確保不被盤後交易(After-hours)干擾
+            # 使用 history 獲取正規交易數據
             h_data_short = tk.history(period="5d", auto_adjust=False, prepost=False)
             
             if len(h_data_short) >= 2:
-                # 取得最後兩個交易日的正規收盤價
                 curr_p = h_data_short['Close'].iloc[-1]
                 p_close = h_data_short['Close'].iloc[-2]
             else:
-                # 備援：若數據不足則使用 fast_info
                 curr_p = tk.fast_info['last_price']
                 p_close = tk.fast_info['previous_close']
 
@@ -84,21 +82,18 @@ try:
             h52_map[index] = tk.fast_info['year_high']
             l52_map[index] = tk.fast_info['year_low']
             
-            # 歷史圖表改用 12 個月數據
             h_12m = tk.history(period="12mo", auto_adjust=False)['Close']
             h_12m.index = h_12m.index.tz_localize(None).normalize()
             rate = usd_to_twd if row['currency'].upper() == "USD" else 1
             sym_history = (h_12m * row['shares'] * rate).to_frame(name=sym)
             history_list.append(sym_history)
             
-            # 股息從 dividends 抓取，避開 info
             try:
                 divs = tk.dividends
                 div_map[sym] = divs[divs.index > (pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=365))].sum() if not divs.empty else 0.0
             except:
                 div_map[sym] = 0.0
             
-            # 加入微小延遲避免連線過快
             time.sleep(0.05)
 
     # --- 5. 數據運算 ---
@@ -114,9 +109,7 @@ try:
         cost_twd = row['cost'] * row['shares'] * rate
         
         daily_change = mv_twd - prev_mv_twd
-        # 強制計算：(322.51 - 309.86) / 309.86 = 4.08%
         daily_pct = ((curr_price - prev_price) / prev_price * 100) if prev_price > 0 else 0
-        
         profit_twd = mv_twd - cost_twd
         roi = (profit_twd / cost_twd * 100) if cost_twd > 0 else 0
         
@@ -130,11 +123,13 @@ try:
     df[['current_price', 'prev_close', 'mv_twd', 'profit_twd', 'roi', 'net_div_twd', 'yield_rate', 'daily_change_twd', 'daily_pct', 'h52', 'l52']] = df.apply(process_row, axis=1)
     total_mv = df['mv_twd'].sum()
 
-    # --- 6. 趨勢圖與月表 ---
+    # --- 6. 趨勢圖與月表 (修正 ME 錯誤) ---
     history_combined = pd.concat(history_list, axis=1).interpolate(method='linear').ffill().bfill()
     trend_data = history_combined.sum(axis=1).to_frame(name='Total_MV')
     trend_data.iloc[-1] = total_mv 
-    monthly_data = trend_data.resample('M').last().sort_index(ascending=False)
+    
+    # 【關鍵修正】'M' 改為 'ME'
+    monthly_data = trend_data.resample('ME').last().sort_index(ascending=False)
     monthly_data['月變動 (TWD)'] = monthly_data['Total_MV'].diff(periods=-1)
     monthly_data['月變動 %'] = (monthly_data['月變動 (TWD)'] / monthly_data['Total_MV'].shift(-1) * 100)
 
@@ -149,7 +144,7 @@ try:
     m4.metric("年度預估稅後配息", f"${df['net_div_twd'].sum():,.0f}")
     m5.metric("當前匯率", f"{usd_to_twd:.2f}")
 
-    # --- B. 12 個月趨勢圖 ---
+    # --- B. 圖表呈現 ---
     st.markdown("---")
     st.subheader("📈 過去 12 個月總資產趨勢 (動態 Y 軸)")
     y_min, y_max = trend_data['Total_MV'].min() * 0.97, trend_data['Total_MV'].max() * 1.03
@@ -162,7 +157,6 @@ try:
         'Total_MV': '{:,.0f}', '月變動 (TWD)': '{:,.0f}', '月變動 %': '{:.2f}%'
     }).applymap(color_roi_custom, subset=['月變動 (TWD)', '月變動 %']), use_container_width=True)
 
-    # --- C. 圖表區 ---
     st.markdown("---")
     c1, c2 = st.columns(2)
     with c1:
@@ -172,25 +166,11 @@ try:
         st.subheader("📈 個股損益排行 (TWD)")
         st.plotly_chart(px.bar(df.sort_values('profit_twd'), x='profit_twd', y='name', orientation='h', color='profit_twd', color_continuous_scale='RdYlGn'), use_container_width=True)
 
-    # --- D. 完整持倉清單 (包含校準後的昨收價) ---
     st.markdown("---")
     st.subheader("📝 完整持倉清單")
     st.dataframe(df[['name', 'symbol', 'shares', 'current_price', 'prev_close', 'daily_change_twd', 'daily_pct', 'profit_twd', 'roi']].style.format({
         'current_price': '{:.2f}', 'prev_close': '{:.2f}', 'daily_change_twd': '{:,.0f}', 'daily_pct': '{:.2f}%', 'profit_twd': '{:,.0f}', 'roi': '{:.2f}%'
     }).applymap(color_roi_custom, subset=['roi', 'daily_change_twd', 'daily_pct']), use_container_width=True)
-
-    # --- E. 底部統計區 (垂直排列) ---
-    st.markdown("---")
-    st.subheader("💰 年度個股配息統計 (NTD)")
-    st.dataframe(df[df['net_div_twd'] > 0][['name', 'symbol', 'shares', 'yield_rate', 'net_div_twd']].sort_values('net_div_twd', ascending=False).style.format({'yield_rate': '{:.2f}%', 'net_div_twd': '{:,.0f}'}), use_container_width=True)
-    
-    st.markdown("---")
-    st.subheader("📉 52 週高低點風險監控")
-    risk_df = df[['name', 'symbol', 'current_price', 'h52', 'l52']].copy()
-    risk_df['較高點跌幅 %'] = ((risk_df['current_price'] - risk_df['h52']) / risk_df['h52'] * 100)
-    st.dataframe(risk_df.style.format({
-        'current_price': '{:.2f}', 'h52': '{:.2f}', 'l52': '{:.2f}', '較高點跌幅 %': '{:.2f}%'
-    }).applymap(lambda x: 'color: red', subset=['較高點跌幅 %']), use_container_width=True)
 
 except Exception as e:
     st.error(f"系統錯誤: {e}")
