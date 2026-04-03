@@ -2,3 +2,7 @@ streamlit
 yfinance
 pandas
 plotly
+matplotlib
+requests
+beautifulsoup4
+lxml
