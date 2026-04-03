@@ -34,7 +34,7 @@ gsheet_id = st.secrets.get("GSHEET_ID")
 @st.cache_data(ttl=600) # 縮短快取時間，方便即時更新
 def load_data(sheet_id):
     # 修正 gid 連結與空格問題
-    url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid=0"
+    url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid=601349851"
     headers = {"User-Agent": "Mozilla/5.0"}
     response = requests.get(url, headers=headers)
     data = pd.read_csv(io.StringIO(response.text))
