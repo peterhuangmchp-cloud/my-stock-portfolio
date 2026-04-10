@@ -59,7 +59,7 @@ def color_roi_custom(val):
 try:
     df = load_data(gsheet_id)
     
-    # --- 4. 數據同步 (包含配息資料補回) ---
+    # --- 4. 數據同步 (修正 normalize 報錯版) ---
     with st.spinner('正在同步全球行情與配息數據...'):
         price_map, prev_close_map, div_map, h52_map, l52_map = {}, {}, {}, {}, {}
         history_list = []
@@ -73,9 +73,10 @@ try:
             if not h_data.empty:
                 curr_p = h_data['Close'].iloc[-1]
                 p_close = h_data['Close'].iloc[-2] if len(h_data) >= 2 else curr_p
-                h_1y = tk.history(period="1y")
-                h52 = h_1y['High'].max() if not h_1y.empty else curr_p
-                l52 = h_1y['Low'].min() if not h_1y.empty else curr_p
+                # 避開 fast_info 報錯
+                h_1y_data = tk.history(period="1y")
+                h52 = h_1y_data['High'].max() if not h_1y_data.empty else curr_p
+                l52 = h_1y_data['Low'].min() if not h_1y_data.empty else curr_p
             else:
                 curr_p = p_close = h52 = l52 = 0
             
@@ -84,18 +85,18 @@ try:
             h52_map[index] = h52
             l52_map[index] = l52
             
-            # 趨勢數據
-            h_12m_df = tk.history(period="1y")
-            if not h_12m_df.empty:
-                h_12m = h_12m_df['Close'].tz_localize(None).normalize()
+            # 歷史趨勢數據 (修正時區與格式問題)
+            if not h_1y_data.empty:
+                h_12m = h_1y_data['Close'].copy()
+                # 修正：先轉為無時區日期，再執行格式化
+                h_12m.index = pd.to_datetime(h_12m.index).tz_localize(None).normalize()
                 rate = usd_to_twd if row['currency'].upper() == "USD" else 1
                 history_list.append((h_12m * row['shares'] * rate).to_frame(name=sym))
             
-            # 【補回配息邏輯】抓取過去 365 天的配息總額
+            # 補回配息邏輯
             try:
                 div_series = tk.dividends
                 if not div_series.empty:
-                    # 篩選過去一年的配息
                     last_year_divs = div_series[div_series.index > (pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=365))]
                     div_map[sym] = last_year_divs.sum()
                 else:
@@ -105,12 +106,11 @@ try:
             
             time.sleep(0.05) 
 
-    # --- 5. 數據運算 (包含稅務邏輯) ---
+    # --- 5. 數據運算 ---
     bond_list = ['TLT', 'SHV', 'SGOV', 'LQD']
     def process_row(row):
         idx = row.name
-        cp = price_map.get(idx, 0)
-        pp = prev_close_map.get(idx, 0)
+        cp, pp = price_map.get(idx, 0), prev_close_map.get(idx, 0)
         rate = usd_to_twd if row['currency'].upper() == "USD" else 1
         
         mv_twd = cp * row['shares'] * rate
@@ -120,36 +120,48 @@ try:
         profit = mv_twd - cost_twd
         roi = (profit / cost_twd * 100) if cost_twd > 0 else 0
         
-        # 配息運算
-        div_per_share = div_map.get(row['symbol'], 0)
-        # 美股非債券類扣 30% 稅
-        tax_rate = 0.7 if row['currency'].upper() == "USD" and row['symbol'] not in bond_list else 1.0
-        net_div_twd = div_per_share * row['shares'] * tax_rate * rate
+        # 配息預估 (30% 稅率邏輯)
+        div_ps = div_map.get(row['symbol'], 0)
+        tax = 0.7 if row['currency'].upper() == "USD" and row['symbol'] not in bond_list else 1.0
+        net_div = div_ps * row['shares'] * tax * rate
         
-        return pd.Series([cp, pp, mv_twd, profit, roi, net_div_twd, daily_chg, daily_pct, h52_map.get(idx, 0), l52_map.get(idx, 0)])
+        return pd.Series([cp, pp, mv_twd, profit, roi, net_div, daily_chg, daily_pct, h52_map.get(idx, 0), l52_map.get(idx, 0)])
 
     df[['current_price', 'prev_close', 'mv_twd', 'profit_twd', 'roi', 'net_div_twd', 'daily_chg_twd', 'daily_pct', 'h52', 'l52']] = df.apply(process_row, axis=1)
     total_mv = df['mv_twd'].sum()
 
-    # --- 6. 趨勢與摘要 ---
+    # --- 6. 趨勢圖與月表 (修正 ME 重採樣) ---
     if history_list:
         history_combined = pd.concat(history_list, axis=1).interpolate().ffill().bfill()
         trend_data = history_combined.sum(axis=1).to_frame(name='Total_MV')
         trend_data.iloc[-1] = total_mv 
         
+        monthly_data = trend_data.resample('ME').last().sort_index(ascending=False)
+        monthly_data['月變動 (TWD)'] = monthly_data['Total_MV'].diff(periods=-1)
+        monthly_data['月變動 %'] = (monthly_data['月變動 (TWD)'] / monthly_data['Total_MV'].shift(-1) * 100)
+
+        # --- A. 摘要指標 ---
+        total_chg = df['daily_chg_twd'].sum()
         m1, m2, m3, m4, m5 = st.columns(5)
         m1.metric("總資產市值 (TWD)", f"${total_mv:,.0f}")
-        total_chg = df['daily_chg_twd'].sum()
         m2.metric("今日資產變動", f"${total_chg:,.0f}", f"{(total_chg/(total_mv-total_chg)*100 if total_mv != total_chg else 0):.2f}%")
         m3.metric("總累計損益", f"${df['profit_twd'].sum():,.0f}", f"{(df['profit_twd'].sum()/total_mv*100 if total_mv != 0 else 0):.2f}%")
-        # 這裡會重新顯示您的預估配息
         m4.metric("年度預估稅後配息", f"${df['net_div_twd'].sum():,.0f}")
         m5.metric("美金匯率", f"{usd_to_twd:.2f}")
 
+        # --- B. 12 個月趨勢圖 ---
         st.markdown("---")
-        st.plotly_chart(px.area(trend_data, y='Total_MV', title="📈 總資產市值趨勢 (TWD)", template="plotly_white"), use_container_width=True)
+        fig_trend = px.area(trend_data, y='Total_MV', title="📈 總資產市值趨勢 (TWD)", template="plotly_white")
+        fig_trend.update_layout(yaxis=dict(tickformat=",.0f"))
+        st.plotly_chart(fig_trend, use_container_width=True)
 
-    # 詳細表格
+        # --- C. 月表 ---
+        st.subheader("🗓️ 過去 12 個月總資產變化表")
+        st.dataframe(monthly_data.style.format({
+            'Total_MV': '{:,.0f}', '月變動 (TWD)': '{:,.0f}', '月變動 %': '{:.2f}%'
+        }).map(color_roi_custom, subset=['月變動 (TWD)', '月變動 %']), use_container_width=True)
+
+    # --- D. 持倉清單 ---
     st.subheader("📝 完整持倉與配息預估")
     st.dataframe(df[['name', 'symbol', 'current_price', 'mv_twd', 'profit_twd', 'roi', 'net_div_twd']].style.format({
         'current_price': '{:.2f}', 'mv_twd': '{:,.0f}', 'profit_twd': '{:,.0f}', 'roi': '{:.2f}%', 'net_div_twd': '{:,.0f}'
