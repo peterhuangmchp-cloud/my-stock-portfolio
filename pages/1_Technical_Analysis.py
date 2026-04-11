@@ -11,7 +11,7 @@ if "authenticated" not in st.session_state or not st.session_state["authenticate
     st.warning("🔒 請先在主頁面輸入密碼解鎖。")
     st.stop()
 
-st.title("🔍 專業技術指標分析 (全指標完整版)")
+st.title("🔍 專業技術指標分析")
 
 # --- 2. 數據讀取 (同步主程式 GID) ---
 gsheet_id = st.secrets.get("GSHEET_ID")
@@ -64,31 +64,39 @@ try:
                 else:
                     trend_label, trend_desc = "📉 空頭排列", "股價低於 200MA，趨勢偏弱"
 
-                # --- [顯示指標面板] ---
+                # --- [顯示看板] ---
                 st.markdown("---")
                 a1, a2, a3 = st.columns(3)
                 a1.metric("長期趨勢形態", trend_label)
-                a2.metric("RSI (14)", f"{last_rsi:.1f}", "⚠️ 過熱" if last_rsi > 70 else ("✅ 超跌" if last_rsi < 30 else ""))
+                a2.metric("RSI (14) 狀態", f"{last_rsi:.1f}", "⚠️ 過熱" if last_rsi > 70 else ("✅ 超跌" if last_rsi < 30 else ""))
                 a3.metric("200D 乖離率", f"{last_bias:.1f}%", "🔥 偏高" if abs(last_bias) > 15 else "")
 
                 with st.expander("📝 判定邏輯加註", expanded=True):
                     st.write(f"📌 **多空判定**：{trend_desc}")
                     st.write(f"📌 **數值參考**：RSI > 70 表過熱；200D 乖離率 ±15% 為極端值。")
 
-                # --- [繪製四層圖表] ---
+                # --- [繪製四層圖表] 加入各圖標題 ---
                 fig = make_subplots(
-                    rows=4, cols=1, shared_xaxes=True, 
-                    vertical_spacing=0.04, row_heights=[0.5, 0.15, 0.15, 0.2]
+                    rows=4, cols=1, 
+                    shared_xaxes=True, 
+                    vertical_spacing=0.06, # 增加間距避免標題重疊
+                    row_heights=[0.5, 0.15, 0.15, 0.2],
+                    subplot_titles=(
+                        f"📊 {sel_stock} 收盤價 / 均線 / 布林通道", 
+                        "📉 200D 乖離率 (BIAS %)", 
+                        "📊 成交量 (Volume)", 
+                        "💜 強弱指標 (RSI 14)"
+                    )
                 )
                 
-                # 1. 主圖：收盤價 + 均線 + 布林
+                # 1. 主圖
                 fig.add_trace(go.Scatter(x=h.index, y=h['Close'], name='收盤價', line=dict(color='black', width=2)), row=1, col=1)
                 fig.add_trace(go.Scatter(x=h.index, y=h['MA50'], name='50MA', line=dict(color='orange', dash='dot')), row=1, col=1)
                 fig.add_trace(go.Scatter(x=h.index, y=h['MA200'], name='200MA', line=dict(color='blue', dash='dash')), row=1, col=1)
                 fig.add_trace(go.Scatter(x=h.index, y=h['Upper'], name='布林上軌', line=dict(color='rgba(173,216,230,0.5)')), row=1, col=1)
-                fig.add_trace(go.Scatter(x=h.index, y=h['Lower'], name='布林下軌', fill='tonexty'), row=1, col=1)
+                fig.add_trace(go.Scatter(x=h.index, y=h['Lower'], name='布林下軌', line=dict(color='rgba(173,216,230,0.5)'), fill='tonexty'), row=1, col=1)
                 
-                # 2. 乖離率 (BIAS)
+                # 2. 乖離率
                 fig.add_trace(go.Scatter(x=h.index, y=h['BIAS'], name='200D乖離%', line=dict(color='green')), row=2, col=1)
                 fig.add_hline(y=0, line_dash="solid", line_color="gray", row=2, col=1)
                 
@@ -101,7 +109,10 @@ try:
                 fig.add_hline(y=70, line_dash="dash", line_color="red", row=4, col=1)
                 fig.add_hline(y=30, line_dash="dash", line_color="green", row=4, col=1)
 
-                fig.update_layout(height=1100, template="plotly_white", hovermode="x unified")
+                # 更新佈局與字體
+                fig.update_layout(height=1200, template="plotly_white", hovermode="x unified", showlegend=True)
+                fig.update_annotations(font_size=16) # 加大子圖標題字體
+                
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.warning("查無數據。")
