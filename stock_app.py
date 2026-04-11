@@ -26,13 +26,14 @@ def check_password():
 
 check_password()
 
-# --- 3. 核心數據讀取 ---
+# --- 3. 核心數據讀取 (GID 隱私化) ---
 st.title("📊 全球資產損益與配息看板")
 gsheet_id = st.secrets.get("GSHEET_ID")
+main_gid = st.secrets.get("MAIN_GID") # 從 Secrets 讀取，不再洩漏
 
 @st.cache_data(ttl=600)
-def load_data(sheet_id):
-    url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid=601349851"
+def load_data(sheet_id, gid):
+    url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
     headers = {"User-Agent": "Mozilla/5.0"}
     response = requests.get(url, headers=headers)
     data = pd.read_csv(io.StringIO(response.text))
@@ -57,18 +58,28 @@ def color_roi_custom(val):
     return ''
 
 try:
-    df = load_data(gsheet_id)
+    df = load_data(gsheet_id, main_gid)
     
-    # --- 4. 數據同步 ---
+    # --- 4. 數據同步 (包含代號自動修正) ---
     with st.spinner('正在同步全球行情、配息與風險數據...'):
         price_map, prev_close_map, div_map, h52_map = {}, {}, {}, {}
         history_list = []
         
         for index, row in df.iterrows():
-            sym = str(row['symbol']).strip()
+            # 【自動修正代號邏輯】
+            raw_sym = str(row['symbol']).strip().upper()
+            if raw_sym == "CREDO":
+                sym = "CRDO"
+            elif raw_sym.isdigit(): # 如果全是數字(如 2330), 自動補 .TW
+                sym = raw_sym + ".TW"
+            elif ":" in raw_sym: # 處理 TPE:2330 這種格式
+                sym = raw_sym.split(":")[-1] + ".TW"
+            else:
+                sym = raw_sym
+            
             tk = yf.Ticker(sym)
             
-            # 獲取價格與歷史數據
+            # 獲取價格與歷史數據 (避開 fast_info)
             h_1y_data = tk.history(period="1y")
             if not h_1y_data.empty:
                 curr_p = h_1y_data['Close'].iloc[-1]
@@ -87,7 +98,7 @@ try:
             prev_close_map[index] = p_close
             h52_map[index] = h52
             
-            # 配息數據
+            # 配息數據 (過去 365 天)
             try:
                 divs = tk.dividends
                 div_map[sym] = divs[divs.index > (pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=365))].sum() if not divs.empty else 0.0
@@ -108,12 +119,16 @@ try:
         profit = mv_twd - (row['cost'] * row['shares'] * rate)
         roi = (profit / (row['cost'] * row['shares'] * rate) * 100) if row['cost'] > 0 else 0
         
-        # 52週高點跌幅計算
+        # 52週高點跌幅
         drawdown_52h = ((cp - h52) / h52 * 100) if h52 > 0 else 0
         
-        # 配息計算
-        div_ps = div_map.get(row['symbol'], 0)
-        tax = 0.7 if row['currency'].upper() == "USD" and row['symbol'] not in bond_list else 1.0
+        # 配息計算 (美股 30% 稅率)
+        # 先取得修正後的 sym 用來對應配息地圖
+        raw_sym = str(row['symbol']).strip().upper()
+        sym_key = "CRDO" if raw_sym == "CREDO" else (raw_sym.split(":")[-1] + ".TW" if ":" in raw_sym else (raw_sym + ".TW" if raw_sym.isdigit() else raw_sym))
+        div_ps = div_map.get(sym_key, 0)
+        
+        tax = 0.7 if row['currency'].upper() == "USD" and sym_key not in bond_list else 1.0
         net_div = div_ps * row['shares'] * tax * rate
         
         daily_chg = (cp - pp) * row['shares'] * rate
@@ -133,13 +148,11 @@ try:
     m4.metric("年度預估稅後配息", f"${df['net_div_twd'].sum():,.0f}")
     m5.metric("美金匯率", f"{usd_to_twd:.2f}")
 
-    # 趨勢圖
     if history_list:
         history_combined = pd.concat(history_list, axis=1).interpolate().ffill().bfill()
-        st.plotly_chart(px.area(history_combined.sum(axis=1), title="📈 總資產市值趨勢", template="plotly_white"), use_container_width=True)
+        st.plotly_chart(px.area(history_combined.sum(axis=1), title="📈 總資產市值趨勢 (TWD)", template="plotly_white"), use_container_width=True)
 
-    # 核心表格 (加上 52週高點跌幅)
-    st.subheader("📝 詳細持倉與風險指標")
+    st.subheader("📝 詳細持倉與風險監控")
     st.dataframe(df[['name', 'symbol', 'current_price', 'roi', 'net_div_twd', 'drawdown_52h', 'daily_pct']].style.format({
         'current_price': '{:.2f}', 'roi': '{:.2f}%', 'net_div_twd': '{:,.0f}', 'drawdown_52h': '{:.2f}%', 'daily_pct': '{:.2f}%'
     }).map(color_roi_custom, subset=['roi', 'daily_pct'])
