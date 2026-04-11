@@ -6,10 +6,10 @@ import io
 import requests
 import time
 
-# --- 1. 網頁基礎設定 ---
-st.set_page_config(page_title="全球資產損益與配息分析", layout="wide")
+# --- 1. 網頁基本設定 ---
+st.set_page_config(page_title="全球資產與配息監控", layout="wide", page_icon="💰")
 
-# --- 2. 🔐 安全密碼與數據讀取 ---
+# --- 2. 🔐 密碼保護與資料讀取 ---
 def check_password():
     if "authenticated" not in st.session_state:
         st.session_state["authenticated"] = False
@@ -26,15 +26,28 @@ def check_password():
 
 check_password()
 
+# 從 Secrets 讀取關鍵 ID
 gsheet_id = st.secrets.get("GSHEET_ID")
 main_gid = st.secrets.get("MAIN_GID")
 
 @st.cache_data(ttl=600)
-def load_data():
-    url = f"https://docs.google.com/spreadsheets/d/{gsheet_id}/export?format=csv&gid={main_gid}"
-    data = pd.read_csv(io.StringIO(requests.get(url).text))
-    data.columns = data.columns.str.strip().str.lower()
-    return data
+def load_data(sheet_id, gid):
+    url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            data = pd.read_csv(io.StringIO(response.text))
+            data.columns = data.columns.str.strip().str.lower()
+            # 【防護 1】：過濾掉 symbol 為空的空白行，避免長度報錯
+            data = data.dropna(subset=['symbol'])
+            return data
+        else:
+            st.error(f"無法讀取 Google Sheet (狀態碼: {response.status_code})，請檢查 GID 設定。")
+            return None
+    except Exception as e:
+        st.error(f"連線異常: {e}")
+        return None
 
 @st.cache_data(ttl=3600)
 def get_exchange_rate():
@@ -48,95 +61,106 @@ def color_roi(val):
         return 'color: #0088ff' if val > 0 else 'color: #ff4b4b'
     return ''
 
-# --- 3. 核心運算 ---
+# --- 3. 核心數據運算 ---
 try:
-    df = load_data()
-    usd_to_twd = get_exchange_rate()
-    
-    with st.spinner('同步數據中...'):
-        price_map, div_map, h52_map, history_list = {}, {}, {}, []
+    df = load_data(gsheet_id, main_gid)
+    if df is not None:
+        usd_to_twd = get_exchange_rate()
         
-        for index, row in df.iterrows():
-            sym = str(row['symbol']).strip()
-            tk = yf.Ticker(sym)
-            hist = tk.history(period="1y")
+        with st.spinner('正在同步全球行情與配息數據...'):
+            price_map, div_map, h52_map, history_list = {}, {}, {}, []
             
-            if not hist.empty:
-                curr_p = hist['Close'].iloc[-1]
-                h52 = hist['High'].max()
-                price_map[index] = curr_p
-                h52_map[index] = h52
+            for index, row in df.iterrows():
+                sym = str(row['symbol']).strip()
+                tk = yf.Ticker(sym)
+                hist = tk.history(period="1y")
                 
-                h_12m = hist['Close'].copy()
-                h_12m.index = pd.to_datetime(h_12m.index).tz_localize(None).normalize()
-                rate = usd_to_twd if row['currency'].upper() == "USD" else 1
-                history_list.append((h_12m * row['shares'] * rate).to_frame(name=sym))
-            
+                if not hist.empty:
+                    cp = hist['Close'].iloc[-1]
+                    h52 = hist['High'].max()
+                    price_map[index] = cp
+                    h52_map[index] = h52
+                    
+                    # 歷史趨勢計算
+                    h_12m = hist['Close'].copy()
+                    h_12m.index = pd.to_datetime(h_12m.index).tz_localize(None).normalize()
+                    rate = usd_to_twd if row['currency'].upper() == "USD" else 1
+                    history_list.append((h_12m * row['shares'] * rate).to_frame(name=sym))
+                
+                # 年度配息 (過去 365 天)
+                try:
+                    divs = tk.dividends
+                    div_map[sym] = divs[divs.index > (pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=365))].sum() if not divs.empty else 0
+                except:
+                    div_map[sym] = 0
+                
+                time.sleep(0.02) # 防止頻繁請求被 Yahoo 阻擋
+
+        # --- 計算指標 ---
+        bond_list = ['TLT', 'SHV', 'SGOV', 'LQD']
+        
+        def calculate_metrics(row):
             try:
-                divs = tk.dividends
-                div_map[sym] = divs[divs.index > (pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=365))].sum() if not divs.empty else 0
+                cp = price_map.get(row.name, 0)
+                h52 = h52_map.get(row.name, 0)
+                rate = usd_to_twd if row['currency'].upper() == "USD" else 1
+                
+                mv = cp * row['shares'] * rate
+                cost_total = row['cost'] * row['shares'] * rate
+                profit = mv - cost_total
+                roi = (profit / cost_total * 100) if cost_total > 0 else 0
+                drawdown_52h = ((cp - h52) / h52 * 100) if h52 > 0 else 0
+                
+                div_ps = div_map.get(str(row['symbol']).strip(), 0)
+                tax = 0.7 if row['currency'].upper() == "USD" and str(row['symbol']).strip() not in bond_list else 1.0
+                net_div = div_ps * row['shares'] * tax * rate
+                
+                # 【防護 2】：回傳字典格式，確保列長度永遠一致
+                return pd.Series({
+                    'current_price': cp, 'mv_twd': mv, 'profit_twd': profit,
+                    'roi': roi, 'net_div_twd': net_div, 'drawdown_52h': drawdown_52h
+                })
             except:
-                div_map[sym] = 0
-            time.sleep(0.02)
+                return pd.Series({'current_price': 0, 'mv_twd': 0, 'profit_twd': 0, 'roi': 0, 'net_div_twd': 0, 'drawdown_52h': 0})
 
-    # 指標運算
-    bond_list = ['TLT', 'SHV', 'SGOV', 'LQD']
-    def calculate_metrics(row):
-        cp = price_map.get(row.name, 0)
-        h52 = h52_map.get(row.name, 0)
-        rate = usd_to_twd if row['currency'].upper() == "USD" else 1
-        mv = cp * row['shares'] * rate
-        profit = mv - (row['cost'] * row['shares'] * rate)
-        roi = (profit / (row['cost'] * row['shares'] * rate) * 100) if row['cost'] > 0 else 0
-        drawdown_52h = ((cp - h52) / h52 * 100) if h52 > 0 else 0
-        
-        div_ps = div_map.get(str(row['symbol']).strip(), 0)
-        tax = 0.7 if row['currency'].upper() == "USD" and str(row['symbol']).strip() not in bond_list else 1.0
-        net_div = div_ps * row['shares'] * tax * rate
-        return pd.Series([cp, mv, profit, roi, net_div, drawdown_52h])
+        cols = ['current_price', 'mv_twd', 'profit_twd', 'roi', 'net_div_twd', 'drawdown_52h']
+        df[cols] = df.apply(calculate_metrics, axis=1)
 
-    df[['current_price', 'mv_twd', 'profit_twd', 'roi', 'net_div_twd', 'drawdown_52h']] = df.apply(calculate_metrics, axis=1)
+        # --- 4. 介面呈現 ---
+        st.subheader("💰 財務總覽")
+        m1, m2, m3, m4 = st.columns(4)
+        total_mv = df['mv_twd'].sum()
+        m1.metric("總市值 (TWD)", f"${total_mv:,.0f}")
+        m2.metric("總累計損益", f"${df['profit_twd'].sum():,.0f}", f"{(df['profit_twd'].sum()/total_mv*100):.2f}%")
+        m3.metric("年度預估稅後配息", f"${df['net_div_twd'].sum():,.0f}")
+        m4.metric("美元匯率", f"{usd_to_twd:.2f}")
 
-    # --- 4. 顯示：重新排列後的獨立表格區 ---
+        # 表格一：月度變動
+        if history_list:
+            st.markdown("---")
+            st.subheader("📈 表格一：資產變動紀錄 (過去 12 個月)")
+            history_combined = pd.concat(history_list, axis=1).interpolate().ffill().bfill()
+            trend_series = history_combined.sum(axis=1)
+            monthly_df = trend_series.resample('ME').last().sort_index(ascending=False).to_frame(name='月終市值')
+            monthly_df['月變動額'] = monthly_df['月終市值'].diff(periods=-1)
+            monthly_df['月成長率'] = (monthly_df['月變動額'] / monthly_df['月終市值'].shift(-1)) * 100
+            st.dataframe(monthly_df.style.format({
+                '月終市值': '{:,.0f}', '月變動額': '{:,.0f}', '月成長率': '{:.2f}%'
+            }).map(color_roi, subset=['月變動額', '月成長率']), use_container_width=True)
+            st.plotly_chart(px.area(trend_series, title="總市值趨勢 (TWD)", template="plotly_white"), use_container_width=True)
 
-    # A. 財務摘要
-    st.subheader("💰 總體財務摘要")
-    m1, m2, m3, m4 = st.columns(4)
-    total_mv = df['mv_twd'].sum()
-    m1.metric("總市值 (TWD)", f"${total_mv:,.0f}")
-    m2.metric("總損益", f"${df['profit_twd'].sum():,.0f}", f"{(df['profit_twd'].sum()/total_mv*100):.2f}%")
-    m3.metric("年度預估稅後配息", f"${df['net_div_twd'].sum():,.0f}")
-    m4.metric("美元匯率", f"{usd_to_twd:.2f}")
-
-    # B. 【原表格三 改到 表格一】：資產變動紀錄
-    if history_list:
+        # 表格二：市值與損益
         st.markdown("---")
-        st.subheader("📈 表格一：過去 12 個月資產變動紀錄")
-        history_combined = pd.concat(history_list, axis=1).interpolate().ffill().bfill()
-        trend_series = history_combined.sum(axis=1)
-        
-        monthly_df = trend_series.resample('ME').last().sort_index(ascending=False).to_frame(name='月終市值')
-        monthly_df['月變動額'] = monthly_df['月終市值'].diff(periods=-1)
-        monthly_df['月成長率'] = (monthly_df['月變動額'] / monthly_df['月終市值'].shift(-1)) * 100
-        
-        st.dataframe(monthly_df.style.format({
-            '月終市值': '{:,.0f}', '月變動額': '{:,.0f}', '月成長率': '{:.2f}%'
-        }).map(color_roi, subset=['月變動額', '月成長率']), use_container_width=True)
-        
-        st.plotly_chart(px.area(trend_series, title="總資產趨勢圖", template="plotly_white"), use_container_width=True)
+        st.subheader("📑 表格二：詳細持倉與損益監控")
+        st.dataframe(df[['name', 'symbol', 'current_price', 'mv_twd', 'profit_twd', 'roi', 'drawdown_52h']].style.format({
+            'current_price': '{:.2f}', 'mv_twd': '{:,.0f}', 'profit_twd': '{:,.0f}', 'roi': '{:.2f}%', 'drawdown_52h': '{:.2f}%'
+        }).map(color_roi, subset=['roi']), use_container_width=True)
 
-    # C. 【原表格一 改到 表格二】：資產市值與損益
-    st.markdown("---")
-    st.subheader("📑 表格二：資產市值與風險監控")
-    st.dataframe(df[['name', 'symbol', 'current_price', 'mv_twd', 'profit_twd', 'roi', 'drawdown_52h']].style.format({
-        'current_price': '{:.2f}', 'mv_twd': '{:,.0f}', 'profit_twd': '{:,.0f}', 'roi': '{:.2f}%', 'drawdown_52h': '{:.2f}%'
-    }).map(color_roi, subset=['roi']), use_container_width=True)
-
-    # D. 【原表格二 改到 表格三】：獨立配息明細表
-    st.subheader("💵 表格三：年度預估配息明細 (稅後 TWD)")
-    st.dataframe(df[['name', 'symbol', 'shares', 'net_div_twd']].style.format({
-        'shares': '{:,.0f}', 'net_div_twd': '{:,.0f}'
-    }), use_container_width=True)
+        # 表格三：配息明細
+        st.subheader("💵 表格三：年度預估配息明細 (稅後 TWD)")
+        st.dataframe(df[['name', 'symbol', 'shares', 'net_div_twd']].style.format({
+            'shares': '{:,.0f}', 'net_div_twd': '{:,.0f}'
+        }), use_container_width=True)
 
 except Exception as e:
     st.error(f"系統運行錯誤: {e}")
