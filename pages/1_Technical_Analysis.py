@@ -11,9 +11,9 @@ if "authenticated" not in st.session_state or not st.session_state["authenticate
     st.warning("🔒 請先在主頁面輸入密碼解鎖。")
     st.stop()
 
-st.title("🔍 專業技術指標分析與邏輯診斷")
+st.title("🔍 專業技術指標分析 (全指標完整版)")
 
-# --- 2. 數據讀取 ---
+# --- 2. 數據讀取 (同步主程式 GID) ---
 gsheet_id = st.secrets.get("GSHEET_ID")
 main_gid = st.secrets.get("MAIN_GID")
 
@@ -42,65 +42,68 @@ try:
             h = yf.Ticker(sel_stock).history(period="2y")
             
             if not h.empty:
-                # 計算關鍵指標
+                # --- [指標計算區] ---
                 h['MA50'] = h['Close'].rolling(50).mean()
                 h['MA200'] = h['Close'].rolling(200).mean()
                 h['MA20'] = h['Close'].rolling(20).mean()
+                h['Upper'] = h['MA20'] + (h['Close'].rolling(20).std() * 2)
+                h['Lower'] = h['MA20'] - (h['Close'].rolling(20).std() * 2)
                 h['BIAS'] = ((h['Close'] - h['MA200']) / h['MA200']) * 100
                 
-                # RSI 
                 delta = h['Close'].diff()
                 gain = (delta.where(delta > 0, 0)).rolling(14).mean()
                 loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
                 h['RSI'] = 100 - (100 / (1 + gain/loss))
 
-                # --- 核心邏輯判斷 ---
-                last_c = h['Close'].iloc[-1]
-                last_m50 = h['MA50'].iloc[-1]
-                last_m200 = h['MA200'].iloc[-1]
-                last_rsi = h['RSI'].iloc[-1]
-                last_bias = h['BIAS'].iloc[-1]
+                # --- [邏輯診斷區] ---
+                last_c, last_m50, last_m200 = h['Close'].iloc[-1], h['MA50'].iloc[-1], h['MA200'].iloc[-1]
+                last_rsi, last_bias = h['RSI'].iloc[-1], h['BIAS'].iloc[-1]
 
-                # 趨勢邏輯：雙重確認
                 if last_c > last_m200:
-                    if last_m50 > last_m200:
-                        trend_label = "📈 多頭排列"
-                        trend_desc = "股價於 200MA 之上，且 50MA > 200MA (黃金交叉後)"
-                    else:
-                        trend_label = "⚖️ 轉強/整理"
-                        trend_desc = "股價已站上 200MA，但短期均線(50MA)尚未穿過長期均線"
+                    trend_label, trend_desc = ("📈 多頭排列", "股價 > 200MA 且 50MA > 200MA") if last_m50 > last_m200 else ("⚖️ 轉強整理", "股價已站上 200MA，但 50MA 尚未黃金交叉")
                 else:
-                    trend_label = "📉 空頭排列"
-                    trend_desc = "股價低於 200MA，長線走勢偏弱"
+                    trend_label, trend_desc = "📉 空頭排列", "股價低於 200MA，趨勢偏弱"
 
-                # RSI 邏輯
-                rsi_label = "⚠️ 超買" if last_rsi > 70 else ("✅ 超賣" if last_rsi < 30 else "⚖️ 中性")
-                rsi_desc = "RSI > 70 表短線過熱；RSI < 30 表短線超跌"
-
-                # 乖離邏輯
-                bias_label = "🔥 乖離過大" if last_bias > 15 else ("❄️ 乖離過低" if last_bias < -15 else "⚓ 正常")
-                bias_desc = f"股價與 200MA 的距離 ({last_bias:.1f}%)。超過 ±15% 需警惕均值回歸。"
-
-                # --- 顯示診斷看板 ---
+                # --- [顯示指標面板] ---
                 st.markdown("---")
                 a1, a2, a3 = st.columns(3)
                 a1.metric("長期趨勢形態", trend_label)
-                a2.metric("RSI (14) 狀態", rsi_label, f"{last_rsi:.1f}")
-                a3.metric("200D 乖離率", bias_label, f"{last_bias:.1f}%")
+                a2.metric("RSI (14)", f"{last_rsi:.1f}", "⚠️ 過熱" if last_rsi > 70 else ("✅ 超跌" if last_rsi < 30 else ""))
+                a3.metric("200D 乖離率", f"{last_bias:.1f}%", "🔥 偏高" if abs(last_bias) > 15 else "")
 
-                # --- ⚠️ 重點：加註邏輯說明 ---
-                with st.expander("📝 診斷邏輯說明 (FAE 專業基準)", expanded=False):
-                    st.write(f"**1. 趨勢判斷基準：** {trend_desc}")
-                    st.write(f"**2. RSI 判斷基準：** {rsi_desc}")
-                    st.write(f"**3. 乖離率判斷基準：** {bias_desc}")
-                    st.info("💡 註：本診斷以 200MA (年線) 作為長線牛熊分界點。")
+                with st.expander("📝 判定邏輯加註", expanded=True):
+                    st.write(f"📌 **多空判定**：{trend_desc}")
+                    st.write(f"📌 **數值參考**：RSI > 70 表過熱；200D 乖離率 ±15% 為極端值。")
 
-                # --- 圖表與建議 (略) ---
-                fig = make_subplots(rows=4, cols=1, shared_xaxes=True, row_heights=[0.5, 0.15, 0.15, 0.2])
-                fig.add_trace(go.Scatter(x=h.index, y=h['Close'], name='收盤價'), row=1, col=1)
-                fig.add_trace(go.Scatter(x=h.index, y=h['MA200'], name='200MA', line=dict(dash='dash')), row=1, col=1)
-                fig.update_layout(height=900, template="plotly_white")
+                # --- [繪製四層圖表] ---
+                fig = make_subplots(
+                    rows=4, cols=1, shared_xaxes=True, 
+                    vertical_spacing=0.04, row_heights=[0.5, 0.15, 0.15, 0.2]
+                )
+                
+                # 1. 主圖：收盤價 + 均線 + 布林
+                fig.add_trace(go.Scatter(x=h.index, y=h['Close'], name='收盤價', line=dict(color='black', width=2)), row=1, col=1)
+                fig.add_trace(go.Scatter(x=h.index, y=h['MA50'], name='50MA', line=dict(color='orange', dash='dot')), row=1, col=1)
+                fig.add_trace(go.Scatter(x=h.index, y=h['MA200'], name='200MA', line=dict(color='blue', dash='dash')), row=1, col=1)
+                fig.add_trace(go.Scatter(x=h.index, y=h['Upper'], name='布林上軌', line=dict(color='rgba(173,216,230,0.5)')), row=1, col=1)
+                fig.add_trace(go.Scatter(x=h.index, y=h['Lower'], name='布林下軌', fill='tonexty'), row=1, col=1)
+                
+                # 2. 乖離率 (BIAS)
+                fig.add_trace(go.Scatter(x=h.index, y=h['BIAS'], name='200D乖離%', line=dict(color='green')), row=2, col=1)
+                fig.add_hline(y=0, line_dash="solid", line_color="gray", row=2, col=1)
+                
+                # 3. 成交量
+                colors = ['red' if h['Open'].iloc[i] < h['Close'].iloc[i] else 'green' for i in range(len(h))]
+                fig.add_trace(go.Bar(x=h.index, y=h['Volume'], name='成交量', marker_color=colors, opacity=0.7), row=3, col=1)
+                
+                # 4. RSI
+                fig.add_trace(go.Scatter(x=h.index, y=h['RSI'], name='RSI', line=dict(color='purple')), row=4, col=1)
+                fig.add_hline(y=70, line_dash="dash", line_color="red", row=4, col=1)
+                fig.add_hline(y=30, line_dash="dash", line_color="green", row=4, col=1)
+
+                fig.update_layout(height=1100, template="plotly_white", hovermode="x unified")
                 st.plotly_chart(fig, use_container_width=True)
-
+            else:
+                st.warning("查無數據。")
 except Exception as e:
     st.error(f"分析失敗: {e}")
