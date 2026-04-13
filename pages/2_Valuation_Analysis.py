@@ -3,36 +3,23 @@ import pandas as pd
 import yfinance as yf
 import requests
 import io
-import time
 
-# --- 1. 驗證與設定 ---
+# --- 1. 驗證與標題 ---
 if "authenticated" not in st.session_state or not st.session_state["authenticated"]:
     st.warning("🔒 請先在主頁面輸入密碼解鎖。")
     st.stop()
 
-st.title("📊 全標的獲利與估值分析 (電腦增強版)")
+st.title("📊 全標的獲利與估值分析")
 
-# --- 2. 建立偽裝 Session (關鍵：防止 Rate Limit) ---
-def get_safe_ticker(sym):
-    session = requests.Session()
-    # 模擬最新的電腦版 Chrome Headers
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Referer': 'https://finance.yahoo.com/'
-    })
-    return yf.Ticker(sym, session=session)
-
-# --- 3. 數據讀取邏輯 ---
+# --- 2. 數據讀取 (同步主程式 GID) ---
 gsheet_id = st.secrets.get("GSHEET_ID")
 main_gid = st.secrets.get("MAIN_GID")
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=3600)
 def load_holdings():
     url = f"https://docs.google.com/spreadsheets/d/{gsheet_id}/export?format=csv&gid={main_gid}"
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
         if response.status_code == 200:
             df = pd.read_csv(io.StringIO(response.text))
             df.columns = df.columns.str.strip().str.lower()
@@ -43,81 +30,83 @@ def load_holdings():
         return []
 
 def get_valuation_row(sym):
+    """ 抓取單一標的核心估值數據 """
     try:
-        tick = get_safe_ticker(sym)
-        # 嘗試抓取 info，若被鎖則嘗試從 fast_info 補救
+        tick = yf.Ticker(sym)
         info = tick.info
-        
-        # 備援機制：如果 info 是空的
-        cp = info.get('currentPrice', info.get('regularMarketPrice'))
-        if cp is None:
-            cp = tick.fast_info.get('last_price', 0)
-
-        row = {
+        if not info or 'regularMarketPrice' not in info and 'currentPrice' not in info:
+            return None
+        return {
             "Symbol": sym.upper(),
-            "Current Price": cp,
+            "Current Price": info.get('currentPrice', info.get('regularMarketPrice', 0)),
             "EPS (Trailing)": info.get('trailingEps', 0),
             "Current P/E": info.get('trailingPE', 0),
             "Forward EPS": info.get('forwardEps', 0),
             "Forward P/E": info.get('forwardPE', 0)
         }
-        return row
-    except Exception as e:
-        # 如果真的完全抓不到，回傳空結構防止程式崩潰
-        return {k: 0 for k in ["Symbol", "Current Price", "EPS (Trailing)", "Current P/E", "Forward EPS", "Forward P/E"]}
+    except:
+        return None
 
-# --- 4. 介面呈現 ---
+# --- 3. 執行邏輯 ---
 holdings = load_holdings()
 
-tab_summary, tab_search = st.tabs(["📋 持倉總表", "🔍 單一查詢"])
-
-with tab_summary:
-    st.markdown("### 持倉估值對照")
-    
-    if st.button("🔄 刷新/同步數據", use_container_width=True):
+# --- 第一部分：持倉標的估值總表 ---
+st.markdown("### 📋 持倉標的快照 (自動更新)")
+if st.button("🔄 刷新持倉數據"):
+    with st.spinner("正在掃描持倉數據..."):
         all_data = []
-        progress_bar = st.progress(0)
-        
-        for i, sym in enumerate(holdings):
+        for sym in holdings:
             row = get_valuation_row(sym)
-            all_data.append(row)
-            # 增加隨機擾動延遲，降低被偵測機率
-            time.sleep(0.3) 
-            progress_bar.progress((i + 1) / len(holdings))
+            if row: all_data.append(row)
+        st.session_state["valuation_df"] = pd.DataFrame(all_data)
+
+if "valuation_df" in st.session_state:
+    st.dataframe(
+        st.session_state["valuation_df"].style.format({
+            "Current Price": "{:.2f}", "EPS (Trailing)": "{:.2f}",
+            "Current P/E": "{:.2f}", "Forward EPS": "{:.2f}", "Forward P/E": "{:.2f}"
+        }).background_gradient(subset=['Forward P/E'], cmap='RdYlGn_r'),
+        use_container_width=True
+    )
+
+st.markdown("---")
+
+# --- 第二部分：自定義查詢 (不限持倉) ---
+st.markdown("### 🔍 自定義標的深度查詢")
+# 使用 st.selectbox 的 label 加上手動輸入功能
+# 在 Streamlit 中，selectbox 支援輸入文字搜尋，但若要完全自訂，可用 text_input 搭配建議
+manual_sym = st.text_input("輸入美股代號 (例如: MRVL, NVDA, TSLA):", "").upper().strip()
+
+# 如果沒輸入，預設提供持倉選單
+if not manual_sym:
+    sel_stock = st.selectbox("或從持倉清單選擇：", [""] + holdings)
+else:
+    sel_stock = manual_sym
+
+if sel_stock:
+    with st.spinner(f'正在分析 {sel_stock} ...'):
+        data = get_valuation_row(sel_stock)
+        tick = yf.Ticker(sel_stock)
+        info = tick.info
         
-        st.session_state["val_df"] = pd.DataFrame(all_data)
-        progress_bar.empty()
-
-    if "val_df" in st.session_state and not st.session_state["val_df"].empty:
-        df_display = st.session_state["val_df"].copy()
-        target_cols = ["Current Price", "EPS (Trailing)", "Current P/E", "Forward EPS", "Forward P/E"]
-        
-        for col in target_cols:
-            df_display[col] = pd.to_numeric(df_display[col], errors='coerce').fillna(0)
-
-        styled_df = df_display.style.format({k: "{:.2f}" for k in target_cols})
-        styled_df = styled_df.background_gradient(subset=['Forward P/E'], cmap='RdYlGn_r')
-        st.dataframe(styled_df, use_container_width=True, height=550)
-    else:
-        st.info("💡 點擊按鈕載入數據。")
-
-with tab_search:
-    manual_sym = st.text_input("輸入代號 (如: AVGO):").upper().strip()
-    target = manual_sym if manual_sym else st.selectbox("或選擇持倉：", [""] + holdings)
-
-    if target:
-        with st.spinner(f'正在分析 {target}...'):
-            data = get_valuation_row(target)
-            if data and data['Current Price'] > 0:
-                st.write(f"#### {target} 核心數據")
-                st.table(pd.DataFrame([data]).set_index("Symbol"))
-                
-                # 額外細節抓取
-                tick = get_safe_ticker(target)
-                info = tick.info
-                m1, m2, m3 = st.columns(3)
-                m1.metric("營收成長", f"{info.get('revenueGrowth', 0)*100:.2f}%")
-                m2.metric("淨利率", f"{info.get('profitMargins', 0)*100:.2f}%")
-                m3.metric("PEG Ratio", info.get('pegRatio', 'N/A'))
-            else:
-                st.error(f"目前 Yahoo Finance 限制了 {target} 的查詢，請 30 秒後再試。")
+        if data:
+            # 顯示核心 5 指標表格
+            st.write(f"#### {sel_stock} 核心估值對照")
+            st.table(pd.DataFrame([data]).set_index("Symbol"))
+            
+            # 深度指標
+            d1, d2, d3 = st.columns(3)
+            rev_growth = info.get('revenueGrowth', 0) * 100
+            profit_margin = info.get('profitMargins', 0) * 100
+            peg_ratio = info.get('pegRatio', 'N/A')
+            
+            d1.metric("營收成長 (YoY)", f"{rev_growth:.2f}%")
+            d2.metric("淨利率 (Margin)", f"{profit_margin:.2f}%")
+            d3.metric("PEG Ratio", f"{peg_ratio}")
+            
+            with st.expander("🔍 更多財務細節"):
+                st.write(f"**市值:** {info.get('marketCap', 0):,}")
+                st.write(f"**分析師建議:** {info.get('recommendationKey', 'N/A').upper()}")
+                st.write(f"**預估 Forward EPS 來源:** Yahoo Finance 分析師平均預測值")
+        else:
+            st.error(f"找不到標的 {sel_stock}，請確認代號是否正確。")
