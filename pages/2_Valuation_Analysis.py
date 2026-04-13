@@ -3,64 +3,67 @@ import pandas as pd
 import requests
 import io
 
-# --- 1. 驗證 ---
-if "authenticated" not in st.session_state or not st.session_state["authenticated"]:
-    st.warning("🔒 請先解鎖。")
-    st.stop()
+# --- 1. 從 Secrets 取得設定 ---
+# 確保你的 secrets.toml 裡有 GSHEET_ID 和 PORTFOLIO_GID
+gsheet_id = st.secrets["GSHEET_ID"]
+portfolio_gid = st.secrets["PORTFOLIO_GID"]  # 這是 Portfolio 分頁的 GID
 
 st.title("📊 全標的獲利與估值分析")
 
-# --- 2. 數據讀取 (優化為直接讀取你設定好的 Portfolio 分頁) ---
-gsheet_id = st.secrets.get("GSHEET_ID")
-# 確保這個 GID 是你 "Portfolio" 分頁的 GID (在網址列 gid= 後面的數字)
-portfolio_gid = "你的Portfolio分頁GID" 
-
-@st.cache_data(ttl=86400) # 👈 設定為 86400 秒 (即 24 小時更新一次)
-def load_valuation_from_sheet():
+# --- 2. 核心邏輯：從 Google Sheet 讀取已存好的數據 ---
+@st.cache_data(ttl=86400)  # 👈 重要：設定 TTL 為 86400 秒 (24小時)，達成一天只抓一次
+def load_data_from_gsheet():
+    # 這是 Google Sheet 匯出為 CSV 的固定格式
     url = f"https://docs.google.com/spreadsheets/d/{gsheet_id}/export?format=csv&gid={portfolio_gid}"
+    
     try:
+        # 使用 headers 模擬瀏覽器，避免被 Google 阻擋
         response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
         if response.status_code == 200:
             df = pd.read_csv(io.StringIO(response.text))
-            # 確保欄位名稱正確 (根據你的截圖)
-            df.columns = [
-                'Name', 'Symbol', 'Price', 'Trailing_EPS', 
-                'Trailing_PE', 'Forward_EPS', 'Forward_PE'
-            ]
+            # 清理欄位多餘空白
+            df.columns = df.columns.str.strip()
             return df
-        return pd.DataFrame()
+        else:
+            st.error(f"無法讀取試算表，狀態碼：{response.status_code}")
+            return pd.DataFrame()
     except Exception as e:
-        st.error(f"讀取失敗: {e}")
+        st.error(f"讀取過程發生錯誤: {e}")
         return pd.DataFrame()
 
-# --- 3. 顯示邏輯 ---
-df = load_valuation_from_sheet()
+# --- 3. 執行與顯示 ---
+df = load_data_from_gsheet()
 
 if not df.empty:
-    # 移除標題列
-    df = df.dropna(subset=['Symbol'])
-    
-    # 過濾掉債券類 (根據你的清單)
-    exclude = ['TLT', 'SHV', 'SGOV', 'LQD']
-    df_display = df[~df['Symbol'].isin(exclude)].copy()
+    # 排除不需要分析的標的（債券、現金等）
+    exclude_list = ['TLT', 'SHV', 'SGOV', 'LQD', 'CASH', 'USDT']
+    # 假設你的代號欄位標題是 "Symbol"
+    df_analysis = df[~df['Symbol'].isin(exclude_list)].copy()
 
-    st.markdown(f"### 📋 核心持倉估值表 (最後同步時間: {pd.Timestamp.now().strftime('%Y-%m-%d')})")
+    st.markdown(f"### 📋 持倉標的快照 (數據源：Google Sheet)")
     
-    # 格式化並顯示
+    # 定義要顯示的欄位 (請對應你截圖中的標題)
+    display_cols = ['Symbol', 'Price', 'Trailing EPS', 'Trailing PE', 'Forward EPS', 'Forward PE']
+    
+    # 確保只選擇存在的欄位
+    available_cols = [c for c in display_cols if c in df_analysis.columns]
+    
+    # 顯示表格並美化
     st.dataframe(
-        df_display.style.format({
+        df_analysis[available_cols].style.format({
             "Price": "{:.2f}", 
-            "Trailing_EPS": "{:.2f}",
-            "Trailing_PE": "{:.2f}", 
-            "Forward_EPS": "{:.2f}", 
-            "Forward_PE": "{:.2f}"
-        }).background_gradient(subset=['Forward_PE'], cmap='RdYlGn_r'),
+            "Trailing EPS": "{:.2f}", 
+            "Trailing PE": "{:.2f}",
+            "Forward EPS": "{:.2f}", 
+            "Forward PE": "{:.2f}"
+        }).background_gradient(subset=['Forward PE'], cmap='RdYlGn_r'),
         use_container_width=True
     )
-    
-    # 強制重新整理按鈕
-    if st.button("🚀 強制從 Google Sheet 重新抓取"):
+
+    # 提供一個強制刷新的按鈕（以防萬一你在 Google Sheet 改了資料想立刻看到）
+    if st.button("🔄 立即從試算表同步新數據"):
         st.cache_data.clear()
         st.rerun()
+
 else:
-    st.info("尚未讀取到數據，請確認 Google Sheet 分頁設定。")
+    st.info("目前無可用數據，請檢查 Google Sheet 權限設定。")
