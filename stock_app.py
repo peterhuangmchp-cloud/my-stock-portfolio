@@ -11,10 +11,10 @@ st.set_page_config(
     page_title="私人投資儀表板", 
     layout="wide", 
     page_icon="💰",
-    initial_sidebar_state="collapsed" # 手機開啟時自動隱藏側邊欄
+    initial_sidebar_state="collapsed"
 )
 
-# 自定義 CSS 讓手機版表格更美觀
+# 自定義 CSS
 st.markdown("""
     <style>
     .main { padding-top: 1rem; }
@@ -74,7 +74,7 @@ try:
     if df is not None:
         usd_to_twd = get_exchange_rate()
         
-        with st.spinner('📱 正在同步全球行情...'):
+        with st.spinner('📱 正在同步全球行情與配息...'):
             price_map, prev_map, div_map, h52_map, history_list = {}, {}, {}, {}, []
             
             for index, row in df.iterrows():
@@ -88,21 +88,21 @@ try:
                     h52 = hist['High'].max()
                     price_map[index], prev_map[index], h52_map[index] = cp, pp, h52
                     
-                    # 趨勢圖數據
                     h_12m = hist['Close'].copy()
                     h_12m.index = pd.to_datetime(h_12m.index).tz_localize(None).normalize()
                     rate = usd_to_twd if row['currency'].upper() == "USD" else 1
                     history_list.append((h_12m * row['shares'] * rate).to_frame(name=sym))
                 
-                # 配息抓取
+                # 抓取過去一年配息總和
                 try:
                     divs = tk.dividends
-                    div_map[sym] = divs[divs.index > (pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=365))].sum() if not divs.empty else 0
+                    # 統一時區進行過濾
+                    one_year_ago = pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=365)
+                    div_map[sym] = divs[divs.index > one_year_ago].sum() if not divs.empty else 0
                 except:
                     div_map[sym] = 0
-                time.sleep(0.01) # 微調延遲加快載入
+                time.sleep(0.01)
 
-        # 指標計算
         bond_list = ['TLT', 'SHV', 'SGOV', 'LQD']
         def calculate_metrics(row):
             cp, pp = price_map.get(row.name, 0), prev_map.get(row.name, 0)
@@ -115,6 +115,7 @@ try:
             drawdown_52h = ((cp - h52) / h52 * 100) if h52 > 0 else 0
             daily_chg = (cp - pp) * row['shares'] * rate
             
+            # 稅後配息計算
             div_ps = div_map.get(str(row['symbol']).strip(), 0)
             tax = 0.7 if row['currency'].upper() == "USD" and str(row['symbol']).strip() not in bond_list else 1.0
             net_div = div_ps * row['shares'] * tax * rate
@@ -131,31 +132,33 @@ try:
         # --- 4. 介面呈現 ---
         total_mv = df['mv_twd'].sum()
         total_daily_chg = df['daily_chg_twd'].sum()
+        total_net_div = df['net_div_twd'].sum()
+        avg_monthly_div = total_net_div / 12
         daily_pct = (total_daily_chg / (total_mv - total_daily_chg) * 100) if (total_mv - total_daily_chg) != 0 else 0
 
-        # 指標看板 (手機會自動 2x2 或 1x4 排列)
+        # 指標看板
         st.subheader("💰 財務快照")
-        m1, m2 = st.columns(2)
-        m3, m4 = st.columns(2)
+        c1, c2 = st.columns(2)
+        c3, c4 = st.columns(2)
         
-        m1.metric("總市值 (TWD)", f"${total_mv:,.0f}")
-        m2.metric("總累計損益", f"${df['profit_twd'].sum():,.0f}", delta=f"${total_daily_chg:,.0f} ({daily_pct:.2f}%)")
-        m3.metric("年度稅後配息", f"${df['net_div_twd'].sum():,.0f}")
-        m4.metric("美元/台幣", f"{usd_to_twd:.2f}")
+        c1.metric("總市值 (TWD)", f"${total_mv:,.0f}")
+        c2.metric("總累計損益", f"${df['profit_twd'].sum():,.0f}", delta=f"${total_daily_chg:,.0f} ({daily_pct:.2f}%)")
+        
+        # 新增：總計年配息與平均月配息
+        c3.metric("年度預估配息 (稅後)", f"${total_net_div:,.0f}", help="過去 12 個月已發放股息之總和（已扣除美股 30% 稅）")
+        c4.metric("平均月收息 (TWD)", f"${avg_monthly_div:,.0f}", help="年配息金額除以 12 個月")
 
         # 資產趨勢圖
         if history_list:
             st.markdown("---")
             history_combined = pd.concat(history_list, axis=1).interpolate().ffill().bfill()
             trend_series = history_combined.sum(axis=1)
-            
-            # 手機版縮小圖表高度
             fig = px.area(trend_series, title="資產成長曲線", template="plotly_white")
             fig.update_layout(height=400, margin=dict(l=10, r=10, t=40, b=10))
             st.plotly_chart(fig, use_container_width=True)
 
-        # 分頁顯示表格 (手機版分開顯示才不會太擠)
-        tab1, tab2, tab3 = st.tabs(["📑 市值損益", "📈 月變動", "💵 配息"])
+        # 分頁顯示表格
+        tab1, tab2, tab3 = st.tabs(["📑 市值損益", "📈 月變動紀錄", "💵 詳細配息清單"])
 
         with tab1:
             st.dataframe(df[['name', 'roi', 'mv_twd', 'profit_twd', 'drawdown_52h']].style.format({
@@ -171,7 +174,9 @@ try:
             }).map(color_roi, subset=['月變動額', '月成長率']), use_container_width=True)
 
         with tab3:
-            st.dataframe(df[['name', 'shares', 'net_div_twd']].style.format({
+            st.write(f"### 🗓️ 預估總年領：${total_net_div:,.0f}")
+            st.write(f"### 🗓️ 預估月均領：${avg_monthly_div:,.0f}")
+            st.dataframe(df[['name', 'symbol', 'shares', 'net_div_twd']].style.format({
                 'shares': '{:,.0f}', 'net_div_twd': '{:,.0f}'
             }), use_container_width=True)
 
