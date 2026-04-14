@@ -30,9 +30,8 @@ check_password()
 def load_data(sheet_id, gid):
     url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
     try:
-        # 增加模擬瀏覽器 Header
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
-        response = requests.get(url, headers=headers)
+        # Google Sheet 讀取仍可使用 requests
+        response = requests.get(url, timeout=10)
         if response.status_code == 200:
             data = pd.read_csv(io.StringIO(response.text))
             data.columns = data.columns.str.strip().str.lower()
@@ -46,44 +45,34 @@ try:
     if df is not None:
         usd_to_twd = 32.5 
         
-        with st.spinner('📱 正在透過備援通道同步數據...'):
+        with st.spinner('📱 正在透過原生通道同步 Yahoo 數據...'):
             price_map, div_amt_map, history_list = {}, {}, []
-            
-            # 使用 session 避免被 Yahoo 封鎖
-            session = requests.Session()
-            session.headers.update({"User-Agent": "Mozilla/5.0"})
 
             for index, row in df.iterrows():
                 sym = str(row['symbol']).strip()
-                # 針對台股代號微調
-                if ".TW" not in sym and sym.isdigit():
-                    sym = f"{sym}.TW"
                 
-                tk = yf.Ticker(sym, session=session)
+                # [核心修正] 移除 session=session，讓 yfinance 自行處理 curl_cffi
+                tk = yf.Ticker(sym)
                 
-                # --- 抓取即時價格 (多重備援) ---
+                # --- 抓取行情 ---
                 try:
                     hist = tk.history(period="1y")
                     if not hist.empty:
                         hist.index = hist.index.tz_localize(None)
                         cp = float(hist['Close'].iloc[-1])
                         
-                        # 處理資產趨勢
                         rate = usd_to_twd if row['currency'].upper() == "USD" else 1
                         h_series = (hist['Close'] * row['shares'] * rate).to_frame(name=sym)
                         h_series.index = h_series.index.normalize()
                         history_list.append(h_series)
+                        price_map[index] = cp
                     else:
-                        # 備援：嘗試抓取 fast_info
-                        cp = tk.fast_info['lastPrice']
+                        price_map[index] = 0
                 except:
-                    cp = 0
-                
-                price_map[index] = cp
+                    price_map[index] = 0
 
-                # --- 抓取年配息 (多重備援) ---
+                # --- 抓取年配息 (直接從 actions 抓取歷史配息) ---
                 try:
-                    # 優先從 actions 抓取歷史配息
                     actions = tk.actions
                     d_sum = 0
                     if not actions.empty and 'Dividends' in actions.columns:
@@ -91,18 +80,18 @@ try:
                         one_year_ago = pd.Timestamp.now().normalize() - pd.Timedelta(days=365)
                         d_sum = float(actions[actions.index > one_year_ago]['Dividends'].sum())
                     
-                    # 如果 actions 抓不到，嘗試從 info 抓取
+                    # 備援：如果 actions 沒資料，嘗試 info (yfinance 會自動處理 curl_cffi)
                     if d_sum == 0:
-                        d_sum = tk.info.get('trailingAnnualDividendRate', 0) or tk.info.get('dividendRate', 0) or 0
-                    
+                        d_sum = tk.info.get('trailingAnnualDividendRate', 0) or 0
+                        
                     div_amt_map[sym] = d_sum
                 except:
                     div_amt_map[sym] = 0
                 
-                # 每次抓取間隔 0.1 秒，降低被封鎖風險
-                time.sleep(0.1)
+                # 稍微延遲避免頻繁請求
+                time.sleep(0.2)
 
-        # 債券與稅務
+        # 債券與稅務 (SHV/SGOV 免 30% 稅)
         bond_list = ['TLT', 'SHV', 'SGOV', 'LQD', '00937B.TW']
         def calculate_metrics(row):
             sym = str(row['symbol']).strip()
@@ -126,7 +115,7 @@ try:
         st.subheader("💰 財務快照")
         c1, c2, c3 = st.columns(3)
         c1.metric("總市值 (TWD)", f"${total_mv:,.0f}")
-        c2.metric("預估年收息 (稅後)", f"${total_net_div:,.0f}")
+        c2.metric("年度預估收息 (稅後)", f"${total_net_div:,.0f}")
         c3.metric("組合殖利率", f"{(total_net_div/total_mv*100 if total_mv > 0 else 0):.2f}%")
 
         if history_list:
@@ -134,7 +123,7 @@ try:
             full_history = pd.concat(history_list, axis=1).ffill().fillna(0).sum(axis=1)
             st.plotly_chart(px.area(full_history, title="總資產趨勢成長曲線 (TWD)", template="plotly_white"), use_container_width=True)
 
-        tab1, tab2, tab3 = st.tabs(["📑 市值損益", "📈 月變動紀錄", "💵 配息詳細清單"])
+        tab1, tab2, tab3 = st.tabs(["📑 市值損益", "📈 月變動紀錄", "💵 配息詳細明細"])
         
         with tab1:
             st.dataframe(df[['name', 'symbol', 'mv_twd', 'profit_twd']].style.format({'mv_twd': '{:,.0f}', 'profit_twd': '{:,.0f}'}), use_container_width=True)
