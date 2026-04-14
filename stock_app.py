@@ -9,8 +9,6 @@ import time
 # --- 1. 網頁基本設定 ---
 st.set_page_config(page_title="私人投資儀表板", layout="wide", page_icon="💰", initial_sidebar_state="collapsed")
 
-st.markdown("""<style>.main { padding-top: 1rem; } .stMetric { background-color: #f0f2f6; padding: 10px; border-radius: 10px; }</style>""", unsafe_allow_html=True)
-
 # --- 2. 🔐 密碼保護與數據讀取 ---
 def check_password():
     if "authenticated" not in st.session_state:
@@ -71,32 +69,42 @@ try:
             for index, row in df.iterrows():
                 sym = str(row['symbol']).strip()
                 tk = yf.Ticker(sym)
-                hist = tk.history(period="1y")
                 
-                if not hist.empty:
-                    cp = float(hist['Close'].iloc[-1])
-                    pp = float(hist['Close'].iloc[-2]) if len(hist) > 1 else cp
-                    h52 = float(hist['High'].max())
-                    price_map[index], prev_map[index], h52_map[index] = cp, pp, h52
-                    
-                    h_12m = hist['Close'].copy()
-                    h_12m.index = pd.to_datetime(h_12m.index).tz_localize(None).normalize()
-                    rate = usd_to_twd if row['currency'].upper() == "USD" else 1
-                    history_list.append((h_12m * row['shares'] * rate).to_frame(name=sym))
-                
-                # --- 回歸最原始配息抓取 ---
+                # 1. 先抓價格 (這個通常很穩)
                 try:
-                    divs = tk.dividends
-                    if not divs.empty:
-                        div_map[sym] = float(divs.sum())
+                    hist = tk.history(period="1y")
+                    if not hist.empty:
+                        cp = float(hist['Close'].iloc[-1])
+                        pp = float(hist['Close'].iloc[-2]) if len(hist) > 1 else cp
+                        h52 = float(hist['High'].max())
+                        price_map[index], prev_map[index], h52_map[index] = cp, pp, h52
+                        
+                        h_12m = hist['Close'].copy()
+                        h_12m.index = pd.to_datetime(h_12m.index).tz_localize(None).normalize()
+                        rate = usd_to_twd if row['currency'].upper() == "USD" else 1
+                        history_list.append((h_12m * row['shares'] * rate).to_frame(name=sym))
+                except:
+                    st.sidebar.error(f"❌ {sym} 價格抓取失敗")
+
+                # 2. 獨立抓取配息 (這是最容易報錯的地方)
+                try:
+                    # 使用 get_dividends() 較穩定，或是直接訪問 .dividends
+                    div_data = tk.dividends
+                    if div_data is not None and not div_data.empty:
+                        # 只加總最近 365 天的資料，避免歷史資料重複計算
+                        one_year_ago = pd.Timestamp.now().normalize() - pd.Timedelta(days=365)
+                        # 確保 index 沒時區干擾
+                        div_data.index = pd.to_datetime(div_data.index).tz_localize(None)
+                        div_val = float(div_data[div_data.index > one_year_ago].sum())
+                        div_map[sym] = div_val
                     else:
                         div_map[sym] = 0
-                        if row['cost'] > 0: st.sidebar.write(f"ℹ️ {sym}: 無配息紀錄")
                 except Exception as e:
                     div_map[sym] = 0
-                    st.sidebar.error(f"❌ {sym} 配息抓取出錯")
+                    st.sidebar.warning(f"⚠️ {sym} 配息暫時無法取得")
                 
-                time.sleep(0.1)
+                # 增加延遲，減少被封鎖機率
+                time.sleep(0.2)
 
         bond_list = ['TLT', 'SHV', 'SGOV', 'LQD']
         def calculate_metrics(row):
@@ -109,6 +117,7 @@ try:
             roi = float((profit / (row['cost'] * row['shares'] * rate) * 100) if row['cost'] > 0 else 0)
             drawdown_52h = float(((cp - h52) / h52 * 100) if h52 > 0 else 0)
             daily_chg = float((cp - pp) * row['shares'] * rate)
+            
             div_ps = div_map.get(str(row['symbol']).strip(), 0)
             tax = 0.7 if row['currency'].upper() == "USD" and str(row['symbol']).strip() not in bond_list else 1.0
             net_div = float(div_ps * row['shares'] * tax * rate)
@@ -122,7 +131,7 @@ try:
         total_net_div = float(df['net_div_twd'].sum())
         daily_pct = float((total_daily_chg / (total_mv - total_daily_chg) * 100) if (total_mv - total_daily_chg) != 0 else 0)
 
-        # --- 介面呈現 ---
+        # --- 介面 ---
         st.subheader("💰 財務快照")
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("總市值 (TWD)", f"${total_mv:,.0f}", f"${total_daily_chg:,.0f}")
@@ -136,26 +145,18 @@ try:
             trend_series = history_combined.sum(axis=1)
             st.plotly_chart(px.area(trend_series, title="資產成長曲線 (TWD)", template="plotly_white"), use_container_width=True)
 
-        # 這裡把分頁補齊了
         tab1, tab2, tab3 = st.tabs(["📑 市值損益", "📈 月變動紀錄", "💵 詳細配息清單"])
-        
         with tab1:
             st.dataframe(df[['name', 'roi', 'mv_twd', 'profit_twd', 'drawdown_52h']].style.format({
                 'mv_twd': '{:,.0f}', 'profit_twd': '{:,.0f}', 'roi': '{:.2f}%', 'drawdown_52h': '{:.2f}%'
             }).map(color_roi, subset=['roi']), use_container_width=True)
-            
         with tab2:
             monthly_df = trend_series.resample('ME').last().sort_index(ascending=False).to_frame(name='月終市值')
             monthly_df['月變動額'] = monthly_df['月終市值'].diff(periods=-1)
             monthly_df['月成長率'] = (monthly_df['月變動額'] / monthly_df['月終市值'].shift(-1)) * 100
-            st.dataframe(monthly_df.style.format({
-                '月終市值': '{:,.0f}', '月變動額': '{:,.0f}', '月成長率': '{:.2f}%'
-            }).map(color_roi, subset=['月變動額', '月成長率']), use_container_width=True)
-            
+            st.dataframe(monthly_df.style.format({'月終市值': '{:,.0f}', '月變動額': '{:,.0f}', '月成長率': '{:.2f}%'}).map(color_roi, subset=['月變動額', '月成長率']), use_container_width=True)
         with tab3:
-            st.dataframe(df[['name', 'symbol', 'shares', 'net_div_twd']].style.format({
-                'shares': '{:,.0f}', 'net_div_twd': '{:,.0f}'
-            }), use_container_width=True)
+            st.dataframe(df[['name', 'symbol', 'shares', 'net_div_twd']].style.format({'shares': '{:,.0f}', 'net_div_twd': '{:,.0f}'}), use_container_width=True)
 
 except Exception as e:
     st.error(f"系統運行錯誤: {e}")
