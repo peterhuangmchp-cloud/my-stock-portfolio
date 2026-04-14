@@ -64,25 +64,24 @@ try:
                 hist = tk.history(period="1y")
                 
                 if not hist.empty:
-                    # [修復] 強制去時區化，防止與 Timestamp 比較出錯
+                    # [修復] 去時區化，防止比較出錯
                     hist.index = hist.index.tz_localize(None)
-                    
                     cp = float(hist['Close'].iloc[-1])
                     price_map[index] = cp
                     
-                    # 處理資產趨勢數據
+                    # 處理趨勢圖：合併匯率與股數
                     rate = usd_to_twd if row['currency'].upper() == "USD" else 1
                     h_series = (hist['Close'] * row['shares'] * rate).to_frame(name=sym)
                     h_series.index = h_series.index.normalize()
                     history_list.append(h_series)
                 
-                    # --- 配息數據抓取 ---
+                    # --- [優化] 配息抓取邏輯：解決債券 ETF 為 0 的問題 ---
                     try:
                         info = tk.info
-                        d_amt = info.get('dividendRate', 0) or 0
-                        d_yield = info.get('dividendYield', 0) or 0
+                        d_amt = info.get('trailingAnnualDividendRate', 0) or info.get('dividendRate', 0) or 0
+                        d_yield = info.get('trailingAnnualDividendYield', 0) or info.get('dividendYield', 0) or 0
                         
-                        # [修復] 歷史配息日期比對
+                        # 邏輯 A: 若即時數據抓不到，從過去 365 天歷史配息加總
                         if d_amt == 0:
                             divs = tk.dividends
                             if not divs.empty:
@@ -91,14 +90,21 @@ try:
                                 d_amt = float(divs[divs.index > one_year_ago].sum())
                                 d_yield = d_amt / cp if cp > 0 else 0
                         
+                        # 邏輯 B: 針對核心債券標的的「保底參考值」
+                        if d_amt == 0:
+                            manual_yields = {'SHV': 0.052, 'SGOV': 0.052, 'TLT': 0.038, 'LQD': 0.042, '00937B.TW': 0.062}
+                            if sym in manual_yields:
+                                d_yield = manual_yields[sym]
+                                d_amt = cp * d_yield
+                        
                         div_amt_map[sym] = d_amt
-                        div_yield_map[sym] = d_yield * 100
+                        div_yield_map[sym] = d_yield * 100 
                     except:
                         div_amt_map[sym], div_yield_map[sym] = 0, 0
                 
                 time.sleep(0.05)
 
-        # 指標計算
+        # 稅務與指標計算邏輯
         bond_list = ['TLT', 'SHV', 'SGOV', 'LQD']
         def calculate_metrics(row):
             sym = str(row['symbol']).strip()
@@ -107,7 +113,7 @@ try:
             mv = float(cp * row['shares'] * rate)
             profit = float(mv - (row['cost'] * row['shares'] * rate))
             
-            # 稅後計算 (美股扣 30%, 債券/台股免)
+            # 稅後計算 (美股扣 30%，債券免稅)
             tax = 0.7 if row['currency'].upper() == "USD" and sym not in bond_list else 1.0
             net_div = float(div_amt_map.get(sym, 0) * row['shares'] * tax * rate)
             
@@ -123,22 +129,20 @@ try:
         c1, c2, c3 = st.columns(3)
         c1.metric("總市值 (TWD)", f"${total_mv:,.0f}")
         c2.metric("預估年收息 (稅後)", f"${total_net_div:,.0f}")
-        c3.metric("平均組合殖利率", f"{(total_net_div/total_mv*100):.2f}%")
+        c3.metric("組合平均殖利率", f"{(total_net_div/total_mv*100):.2f}%")
 
-        # --- 資產成長曲線 ---
+        # --- 資產趨勢圖 ---
         if history_list:
             st.markdown("---")
             full_history = pd.concat(history_list, axis=1).ffill().fillna(0).sum(axis=1)
-            fig = px.area(full_history, title="總資產趨勢成長曲線 (TWD)", 
-                         template="plotly_white", color_discrete_sequence=['#0088ff'])
+            fig = px.area(full_history, title="總資產趨勢成長曲線 (TWD)", template="plotly_white", color_discrete_sequence=['#0088ff'])
+            fig.update_layout(xaxis_title="日期", yaxis_title="市值 (TWD)", showlegend=False)
             st.plotly_chart(fig, use_container_width=True)
 
-        tab1, tab2, tab3 = st.tabs(["📑 市值損益", "📈 月變動紀錄", "💵 配息詳細清單"])
+        tab1, tab2, tab3 = st.tabs(["📑 市值損益", "📈 月變動紀錄", "💵 詳細配息清單"])
         
         with tab1:
-            st.dataframe(df[['name', 'symbol', 'mv_twd', 'profit_twd']].style.format({
-                'mv_twd': '{:,.0f}', 'profit_twd': '{:,.0f}'
-            }), use_container_width=True)
+            st.dataframe(df[['name', 'symbol', 'mv_twd', 'profit_twd']].style.format({'mv_twd': '{:,.0f}', 'profit_twd': '{:,.0f}'}), use_container_width=True)
             
         with tab2:
             if history_list:
@@ -147,7 +151,6 @@ try:
                 st.dataframe(monthly_df.style.format('{:,.0f}'), use_container_width=True)
             
         with tab3:
-            # 同時顯示金額與利率
             st.dataframe(df[['name', 'symbol', 'div_amt', 'yield_pct', 'net_div_twd']].rename(columns={
                 'div_amt': '每股年配息', 'yield_pct': '殖利率', 'net_div_twd': '預估實拿(TWD)'
             }).style.format({
