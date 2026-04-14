@@ -44,57 +44,54 @@ try:
     if df is not None:
         usd_to_twd = 32.5 
         
-        with st.spinner('📱 正在修復科技股配息數據...'):
+        with st.spinner('📱 正在同步全球數據...'):
             price_map, div_amt_map, history_list = {}, {}, []
 
             for index, row in df.iterrows():
                 sym = str(row['symbol']).strip()
                 tk = yf.Ticker(sym)
                 
-                # --- 抓取行情 ---
+                # --- 1. 抓取價格與趨勢 ---
                 try:
                     hist = tk.history(period="1y")
                     if not hist.empty:
                         hist.index = hist.index.tz_localize(None)
                         cp = float(hist['Close'].iloc[-1])
+                        price_map[index] = cp
                         
                         rate = usd_to_twd if row['currency'].upper() == "USD" else 1
                         h_series = (hist['Close'] * row['shares'] * rate).to_frame(name=sym)
                         h_series.index = h_series.index.normalize()
                         history_list.append(h_series)
-                        price_map[index] = cp
                     else:
                         price_map[index] = 0
                 except:
                     price_map[index] = 0
 
-                # --- [FAE 強化版] 配息抓取三級跳 ---
+                # --- 2. [核心修正] 混合式配息抓取邏輯 ---
                 try:
-                    d_sum = 0
-                    # 第一級：嘗試從 dividends 屬性直接加總 (最穩)
-                    div_series = tk.dividends
-                    if not div_series.empty:
-                        div_series.index = div_series.index.tz_localize(None)
-                        one_year_ago = pd.Timestamp.now().normalize() - pd.Timedelta(days=365)
-                        d_sum = float(div_series[div_series.index > one_year_ago].sum())
+                    d_amt = 0
+                    # A. 先嘗試抓 info (這對 NVDA, AVGO 等科技股最準)
+                    info = tk.info
+                    d_amt = info.get('trailingAnnualDividendRate', 0) or info.get('dividendRate', 0) or 0
                     
-                    # 第二級：如果第一級失敗，嘗試從 info 抓取即時數據
-                    if d_sum == 0:
-                        info = tk.info
-                        d_sum = info.get('trailingAnnualDividendRate', 0) or info.get('dividendRate', 0) or 0
+                    # B. 如果 info 為 0 (這對 SHV, SGOV 月配息標的最常發生)，則改用歷史加總
+                    if d_amt == 0:
+                        divs = tk.dividends
+                        if not divs.empty:
+                            divs.index = divs.index.tz_localize(None)
+                            one_year_ago = pd.Timestamp.now().normalize() - pd.Timedelta(days=365)
+                            d_amt = float(divs[divs.index > one_year_ago].sum())
                     
-                    # 第三級：針對已知標的保底 (例如 NVDA 很低但不是 0)
-                    if d_sum == 0 and sym == 'NVDA': d_sum = 0.04
-                    if d_sum == 0 and sym == 'AAPL': d_sum = 1.00
-                        
-                    div_amt_map[sym] = d_sum
+                    div_amt_map[sym] = d_amt
                 except:
                     div_amt_map[sym] = 0
                 
-                time.sleep(0.1)
+                time.sleep(0.15) # 稍微加長間隔，防止被封鎖
 
-        # 債券與稅務
+        # 債券清單：美股債券免 30% 稅
         bond_list = ['TLT', 'SHV', 'SGOV', 'LQD', '00937B.TW']
+        
         def calculate_metrics(row):
             sym = str(row['symbol']).strip()
             cp = price_map.get(row.name, 0)
@@ -102,6 +99,7 @@ try:
             mv = float(cp * row['shares'] * rate)
             profit = float(mv - (row['cost'] * row['shares'] * rate))
             
+            # 稅後計算
             d_amt = div_amt_map.get(sym, 0)
             tax = 0.7 if row['currency'].upper() == "USD" and sym not in bond_list else 1.0
             net_div = float(d_amt * row['shares'] * tax * rate)
@@ -117,7 +115,7 @@ try:
         st.subheader("💰 財務快照")
         c1, c2, c3 = st.columns(3)
         c1.metric("總市值 (TWD)", f"${total_mv:,.0f}")
-        c2.metric("年度預估收息 (稅後)", f"${total_net_div:,.0f}")
+        c2.metric("預估年收息 (稅後)", f"${total_net_div:,.0f}")
         c3.metric("組合平均殖利率", f"{(total_net_div/total_mv*100 if total_mv > 0 else 0):.2f}%")
 
         if history_list:
@@ -131,7 +129,6 @@ try:
             st.dataframe(df[['name', 'symbol', 'mv_twd', 'profit_twd']].style.format({'mv_twd': '{:,.0f}', 'profit_twd': '{:,.0f}'}), use_container_width=True)
             
         with tab3:
-            # 加入千分位符號，讓介面更專業
             st.dataframe(df[['name', 'symbol', 'div_amt', 'net_div_twd']].rename(columns={
                 'div_amt': '每股年度總配息(原幣)', 'net_div_twd': '預估實拿年息(TWD)'
             }).style.format({
