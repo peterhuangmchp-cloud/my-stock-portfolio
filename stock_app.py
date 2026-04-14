@@ -6,10 +6,10 @@ import io
 import requests
 import time
 
-# --- 1. 基本設定 ---
+# --- 1. 網頁基本設定 ---
 st.set_page_config(page_title="私人投資儀表板", layout="wide", page_icon="💰", initial_sidebar_state="collapsed")
 
-# --- 2. 數據讀取與密碼 ---
+# --- 2. 🔐 密碼與數據讀取 ---
 def check_password():
     if "authenticated" not in st.session_state:
         st.session_state["authenticated"] = False
@@ -38,22 +38,22 @@ def load_data(sheet_id, gid):
     except:
         return None
 
-# --- 3. 核心邏輯 ---
+# --- 3. 核心運算邏輯 ---
 try:
     df = load_data(st.secrets.get("GSHEET_ID"), st.secrets.get("MAIN_GID"))
     if df is not None:
         usd_to_twd = 32.5 
-        # 定義需要特殊處理的債券標的
+        # 標記債券清單，這些標的必須強制掃描歷史配息紀錄
         bond_list = ['TLT', 'SHV', 'SGOV', 'LQD', '00937B.TW']
         
-        with st.spinner('📱 執行雙軌數據修復中...'):
+        with st.spinner('📱 正在針對債券與股票同步數據...'):
             price_map, div_amt_map, history_list = {}, {}, []
 
             for index, row in df.iterrows():
                 sym = str(row['symbol']).strip()
                 tk = yf.Ticker(sym)
                 
-                # --- A. 抓取行情 ---
+                # --- 1. 價格抓取 ---
                 try:
                     hist = tk.history(period="1y")
                     if not hist.empty:
@@ -70,22 +70,24 @@ try:
                 except:
                     price_map[index] = 0
 
-                # --- B. [核心修復] 分流配息抓取邏輯 ---
+                # --- 2. [分流修復版] 配息抓取 ---
                 try:
                     d_amt = 0
                     
+                    # 邏輯 A：如果是債券或月配息 ETF，優先加總歷史紀錄 (解決 SHV/SGOV 為 0)
                     if sym in bond_list:
-                        # 債券 ETF (SHV, SGOV): 強制走歷史紀錄加總 365 天
                         divs = tk.dividends
                         if not divs.empty:
                             divs.index = divs.index.tz_localize(None)
                             one_year_ago = pd.Timestamp.now().normalize() - pd.Timedelta(days=365)
                             d_amt = float(divs[divs.index > one_year_ago].sum())
-                    else:
-                        # 普通股票 (NVDA, AVGO): 優先抓 info 標籤
+                    
+                    # 邏輯 B：如果是股票或上述沒抓到的，嘗試用 info 標籤 (解決 AVGO/NVDA)
+                    if d_amt == 0:
                         info = tk.info
                         d_amt = info.get('trailingAnnualDividendRate', 0) or info.get('dividendRate', 0) or 0
-                        # 備援：如果 info 回傳 0，才去翻歷史紀錄
+                        
+                        # 邏輯 C：如果 info 還是 0，最後保底再去翻一次歷史紀錄
                         if d_amt == 0:
                             divs = tk.dividends
                             if not divs.empty:
@@ -97,9 +99,9 @@ try:
                 except:
                     div_amt_map[sym] = 0
                 
-                time.sleep(0.15)
+                time.sleep(0.15) # 避開 Yahoo 頻率限制
 
-        # 計算損益與稅後收息
+        # 損益與稅後收息計算
         def calculate_metrics(row):
             sym = str(row['symbol']).strip()
             cp = price_map.get(row.name, 0)
@@ -108,7 +110,7 @@ try:
             profit = float(mv - (row['cost'] * row['shares'] * rate))
             
             d_amt = div_amt_map.get(sym, 0)
-            # 稅務邏輯：美股扣 30%，債券豁免
+            # 美股 30% 稅率，債券排除
             tax = 0.7 if row['currency'].upper() == "USD" and sym not in bond_list else 1.0
             net_div = float(d_amt * row['shares'] * tax * rate)
             
@@ -124,23 +126,23 @@ try:
         c1, c2, c3 = st.columns(3)
         c1.metric("總市值 (TWD)", f"${total_mv:,.0f}")
         c2.metric("預估年收息 (稅後)", f"${total_net_div:,.0f}")
-        c3.metric("組合平均殖利率", f"{(total_net_div/total_mv*100 if total_mv > 0 else 0):.2f}%")
+        c3.metric("平均殖利率", f"{(total_net_div/total_mv*100 if total_mv > 0 else 0):.2f}%")
 
         if history_list:
             st.markdown("---")
             full_history = pd.concat(history_list, axis=1).ffill().fillna(0).sum(axis=1)
-            st.plotly_chart(px.area(full_history, title="總資產趨勢成長曲線 (TWD)", template="plotly_white"), use_container_width=True)
+            st.plotly_chart(px.area(full_history, title="總資產趨勢 (TWD)", template="plotly_white"), use_container_width=True)
 
-        tab1, tab3 = st.tabs(["📑 市值損益", "💵 配息詳細明細"])
+        tab1, tab3 = st.tabs(["📑 市值損益", "💵 配息明細"])
         
         with tab1:
             st.dataframe(df[['name', 'symbol', 'mv_twd', 'profit_twd']].style.format({'mv_twd': '{:,.0f}', 'profit_twd': '{:,.0f}'}), use_container_width=True)
             
         with tab3:
             st.dataframe(df[['name', 'symbol', 'div_amt', 'net_div_twd']].rename(columns={
-                'div_amt': '每股年度總配息(原幣)', 'net_div_twd': '預估實拿年息(TWD)'
+                'div_amt': '每股年配息(原幣)', 'net_div_twd': '預估實拿(TWD)'
             }).style.format({
-                '每股年度總配息(原幣)': '${:.2f}', '預估實拿年息(TWD)': '{:,.0f}'
+                '每股年配息(原幣)': '${:.2f}', '預估實拿(TWD)': '{:,.0f}'
             }), use_container_width=True)
 
 except Exception as e:
