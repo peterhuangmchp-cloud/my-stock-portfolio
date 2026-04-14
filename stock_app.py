@@ -11,7 +11,7 @@ st.set_page_config(page_title="私人投資儀表板", layout="wide", page_icon=
 
 st.markdown("""<style>.main { padding-top: 1rem; } .stMetric { background-color: #f0f2f6; padding: 10px; border-radius: 10px; }</style>""", unsafe_allow_html=True)
 
-# --- 2. 🔐 密碼與數據讀取 ---
+# --- 2. 🔐 密碼保護與數據讀取 ---
 def check_password():
     if "authenticated" not in st.session_state:
         st.session_state["authenticated"] = False
@@ -40,13 +40,22 @@ def load_data(sheet_id, gid):
     except:
         return None
 
+@st.cache_data(ttl=3600)
+def get_exchange_rate():
+    try:
+        ticker = yf.Ticker("TWD=X")
+        val = ticker.history(period="1d")['Close'].iloc[-1]
+        return float(val)
+    except:
+        return 32.5
+
 # --- 3. 核心運算邏輯 ---
 try:
     df = load_data(st.secrets.get("GSHEET_ID"), st.secrets.get("MAIN_GID"))
     if df is not None:
-        usd_to_twd = 32.5  # 建議從 Google Sheet 或 API 獲取
+        usd_to_twd = get_exchange_rate()
         
-        with st.spinner('📱 正在抓取 Yahoo 即時行情與歷史變動...'):
+        with st.spinner('📱 正在同步全球行情與配息數據...'):
             price_map, div_amt_map, div_yield_map, history_list = {}, {}, {}, []
             
             for index, row in df.iterrows():
@@ -55,28 +64,37 @@ try:
                 hist = tk.history(period="1y")
                 
                 if not hist.empty:
+                    # [修復] 強制去時區化，防止與 Timestamp 比較出錯
+                    hist.index = hist.index.tz_localize(None)
+                    
                     cp = float(hist['Close'].iloc[-1])
                     price_map[index] = cp
                     
-                    # --- [修復重點] 資產歷史數據處理 ---
+                    # 處理資產趨勢數據
                     rate = usd_to_twd if row['currency'].upper() == "USD" else 1
                     h_series = (hist['Close'] * row['shares'] * rate).to_frame(name=sym)
-                    h_series.index = pd.to_datetime(h_series.index).tz_localize(None).normalize()
+                    h_series.index = h_series.index.normalize()
                     history_list.append(h_series)
                 
                     # --- 配息數據抓取 ---
-                    info = tk.info
-                    d_amt = info.get('dividendRate', 0) or 0
-                    d_yield = info.get('dividendYield', 0) or 0
-                    
-                    # 保底邏輯：若 info 為空則從歷史加總
-                    if d_amt == 0:
-                        divs = tk.dividends
-                        d_amt = float(divs[divs.index > (pd.Timestamp.now() - pd.Timedelta(days=365))].sum()) if not divs.empty else 0
-                        d_yield = d_amt / cp if cp > 0 else 0
+                    try:
+                        info = tk.info
+                        d_amt = info.get('dividendRate', 0) or 0
+                        d_yield = info.get('dividendYield', 0) or 0
                         
-                    div_amt_map[sym] = d_amt
-                    div_yield_map[sym] = d_yield * 100
+                        # [修復] 歷史配息日期比對
+                        if d_amt == 0:
+                            divs = tk.dividends
+                            if not divs.empty:
+                                divs.index = divs.index.tz_localize(None)
+                                one_year_ago = pd.Timestamp.now().normalize() - pd.Timedelta(days=365)
+                                d_amt = float(divs[divs.index > one_year_ago].sum())
+                                d_yield = d_amt / cp if cp > 0 else 0
+                        
+                        div_amt_map[sym] = d_amt
+                        div_yield_map[sym] = d_yield * 100
+                    except:
+                        div_amt_map[sym], div_yield_map[sym] = 0, 0
                 
                 time.sleep(0.05)
 
@@ -89,7 +107,7 @@ try:
             mv = float(cp * row['shares'] * rate)
             profit = float(mv - (row['cost'] * row['shares'] * rate))
             
-            # 稅後配息 (美股 30%, 債券/台股免)
+            # 稅後計算 (美股扣 30%, 債券/台股免)
             tax = 0.7 if row['currency'].upper() == "USD" and sym not in bond_list else 1.0
             net_div = float(div_amt_map.get(sym, 0) * row['shares'] * tax * rate)
             
@@ -105,17 +123,14 @@ try:
         c1, c2, c3 = st.columns(3)
         c1.metric("總市值 (TWD)", f"${total_mv:,.0f}")
         c2.metric("預估年收息 (稅後)", f"${total_net_div:,.0f}")
-        c3.metric("組合平均殖利率", f"{(total_net_div/total_mv*100):.2f}%")
+        c3.metric("平均組合殖利率", f"{(total_net_div/total_mv*100):.2f}%")
 
-        # --- [圖表區] 恢復資產成長曲線 ---
+        # --- 資產成長曲線 ---
         if history_list:
             st.markdown("---")
-            # 合併所有歷史數據並計算每日總合
             full_history = pd.concat(history_list, axis=1).ffill().fillna(0).sum(axis=1)
             fig = px.area(full_history, title="總資產趨勢成長曲線 (TWD)", 
-                         labels={'value': '市值', 'index': '日期'},
                          template="plotly_white", color_discrete_sequence=['#0088ff'])
-            fig.update_layout(showlegend=False, margin=dict(l=20, r=20, t=50, b=20))
             st.plotly_chart(fig, use_container_width=True)
 
         tab1, tab2, tab3 = st.tabs(["📑 市值損益", "📈 月變動紀錄", "💵 配息詳細清單"])
@@ -132,6 +147,7 @@ try:
                 st.dataframe(monthly_df.style.format('{:,.0f}'), use_container_width=True)
             
         with tab3:
+            # 同時顯示金額與利率
             st.dataframe(df[['name', 'symbol', 'div_amt', 'yield_pct', 'net_div_twd']].rename(columns={
                 'div_amt': '每股年配息', 'yield_pct': '殖利率', 'net_div_twd': '預估實拿(TWD)'
             }).style.format({
