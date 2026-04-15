@@ -95,19 +95,31 @@ try:
                     rate = usd_to_twd if row['currency'].upper() == "USD" else 1
                     history_list.append((h_12m * row['shares'] * rate).to_frame(name=sym))
                 
-                # --- [精確修正：僅補強債券抓取方式] ---
+                # --- [修正後的配息抓取：針對 SHV, SGOV 強化] ---
                 try:
-                    info = tk.info
-                    d_val = info.get('trailingAnnualDividendRate', 0) or info.get('dividendRate', 0) or 0
-                    
-                    # 只有在 info 抓不到資料時 (通常是債券)，才去翻閱歷史 dividends
-                    if d_val == 0:
+                    sym_clean = sym.upper().strip()
+                    # 強制針對這兩支債券走歷史紀錄加總
+                    if sym_clean in ['SHV', 'SGOV']:
                         divs = tk.dividends
                         if not divs.empty:
                             div_history = divs.copy()
                             div_history.index = div_history.index.tz_localize(None)
                             one_year_ago = pd.Timestamp.now().normalize() - pd.Timedelta(days=365)
                             d_val = float(div_history[div_history.index > one_year_ago].sum())
+                        else:
+                            d_val = 0
+                    else:
+                        # 其餘標的維持原本穩定的 info 抓取
+                        info = tk.info
+                        d_val = info.get('trailingAnnualDividendRate', 0) or info.get('dividendRate', 0) or 0
+                        # 備援：如果股票 info 抓不到也嘗試翻歷史
+                        if d_val == 0:
+                            divs = tk.dividends
+                            if not divs.empty:
+                                div_history = divs.copy()
+                                div_history.index = div_history.index.tz_localize(None)
+                                one_year_ago = pd.Timestamp.now().normalize() - pd.Timedelta(days=365)
+                                d_val = float(div_history[div_history.index > one_year_ago].sum())
                     
                     div_map[sym] = d_val
                 except:
