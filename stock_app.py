@@ -59,12 +59,11 @@ def load_data(sheet_id, gid):
 @st.cache_data(ttl=3600)
 def get_exchange_rate():
     try:
-        # 抓取美金對台幣匯率
         ticker = yf.Ticker("TWD=X")
         val = ticker.history(period="1d")['Close'].iloc[-1]
         return float(val)
     except:
-        return 32.5 # 失敗時的保底匯率
+        return 32.5 
 
 def color_roi(val):
     if isinstance(val, (int, float)):
@@ -83,7 +82,6 @@ try:
             for index, row in df.iterrows():
                 sym = str(row['symbol']).strip()
                 tk = yf.Ticker(sym)
-                # 抓取一年資料用於趨勢圖與 52 週高點
                 hist = tk.history(period="1y")
                 
                 if not hist.empty:
@@ -92,33 +90,31 @@ try:
                     h52 = float(hist['High'].max())
                     price_map[index], prev_map[index], h52_map[index] = cp, pp, h52
                     
-                    # 處理資產趨勢數據 (統一時區為 None 避免合併錯誤)
                     h_12m = hist['Close'].copy()
                     h_12m.index = pd.to_datetime(h_12m.index).tz_localize(None).normalize()
                     rate = usd_to_twd if row['currency'].upper() == "USD" else 1
                     history_list.append((h_12m * row['shares'] * rate).to_frame(name=sym))
                 
-                # --- [修正後的配息抓取邏輯] ---
+                # --- [修正後的聯集配息抓取邏輯] ---
                 try:
-                    d_val = 0
-                    # 1. 對於科技股，優先從 info 抓取
+                    # 1. 抓取標籤 (對股票穩定)
                     info = tk.info
-                    d_val = info.get('trailingAnnualDividendRate', 0) or info.get('dividendRate', 0) or 0
+                    d_tag = info.get('trailingAnnualDividendRate', 0) or info.get('dividendRate', 0) or 0
                     
-                    # 2. 如果為 0 (債券常用)，或是債券標的，則強制加總歷史紀錄
-                    if d_val == 0 or sym in ['SHV', 'SGOV', 'TLT', 'LQD']:
-                        divs = tk.dividends
-                        if not divs.empty:
-                            # 統一去時區化，解決 Offset-naive/aware 衝突
-                            divs.index = divs.index.tz_localize(None)
-                            one_year_ago = pd.Timestamp.now().normalize() - pd.Timedelta(days=365)
-                            d_val = float(divs[divs.index > one_year_ago].sum())
+                    # 2. 抓取歷史 (對債券與 ETF 穩定)
+                    divs = tk.dividends
+                    d_hist = 0
+                    if not divs.empty:
+                        divs.index = divs.index.tz_localize(None)
+                        one_year_ago = pd.Timestamp.now().normalize() - pd.Timedelta(days=365)
+                        d_hist = float(divs[divs.index > one_year_ago].sum())
                     
-                    div_map[sym] = d_val
+                    # 取最大值，確保兩類資產都不會歸零
+                    div_map[sym] = max(float(d_tag), float(d_hist))
                 except:
                     div_map[sym] = 0
                 
-                time.sleep(0.1) # 緩衝避開 Rate Limit
+                time.sleep(0.1)
 
         bond_list = ['TLT', 'SHV', 'SGOV', 'LQD']
         def calculate_metrics(row):
@@ -133,7 +129,6 @@ try:
             drawdown_52h = float(((cp - h52) / h52 * 100) if h52 > 0 else 0)
             daily_chg = float((cp - pp) * row['shares'] * rate)
             
-            # 稅後配息計算 (美股扣 30%)
             div_ps = div_map.get(str(row['symbol']).strip(), 0)
             tax = 0.7 if row['currency'].upper() == "USD" and str(row['symbol']).strip() not in bond_list else 1.0
             net_div = float(div_ps * row['shares'] * tax * rate)
@@ -158,22 +153,11 @@ try:
         c1, c2 = st.columns(2)
         c3, c4 = st.columns(2)
         
-        c1.metric(
-            label="總市值 (TWD)", 
-            value=f"${total_mv:,.0f}", 
-            delta=f"${total_daily_chg:,.0f} (今日變動)"
-        )
-        
-        c2.metric(
-            label="總累計損益 (TWD)", 
-            value=f"${total_profit:,.0f}", 
-            delta=f"{daily_pct:+.2f}% (今日)"
-        )
-        
+        c1.metric(label="總市值 (TWD)", value=f"${total_mv:,.0f}", delta=f"${total_daily_chg:,.0f} (今日變動)")
+        c2.metric(label="總累計損益 (TWD)", value=f"${total_profit:,.0f}", delta=f"{daily_pct:+.2f}% (今日)")
         c3.metric("年度預估配息 (稅後)", f"${total_net_div:,.0f}")
         c4.metric("平均月收息 (TWD)", f"${avg_monthly_div:,.0f}")
 
-        # 資產趨勢圖
         if history_list:
             st.markdown("---")
             history_combined = pd.concat(history_list, axis=1).ffill().fillna(0)
@@ -182,7 +166,6 @@ try:
             fig.update_layout(height=400, margin=dict(l=10, r=10, t=40, b=10))
             st.plotly_chart(fig, use_container_width=True)
 
-        # 分頁顯示表格
         tab1, tab2, tab3 = st.tabs(["📑 市值損益", "📈 月變動紀錄", "💵 詳細配息清單"])
 
         with tab1:
