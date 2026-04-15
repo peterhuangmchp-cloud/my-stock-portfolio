@@ -95,21 +95,22 @@ try:
                     rate = usd_to_twd if row['currency'].upper() == "USD" else 1
                     history_list.append((h_12m * row['shares'] * rate).to_frame(name=sym))
                 
-                # --- [關鍵修復：聯集抓取邏輯] ---
+                # --- [關鍵修正：中性時區聯集邏輯] ---
                 try:
-                    # 邏輯 A: 抓取標籤資料 (info)，對 AVGO, NVDA 穩定
+                    # 邏輯 1: 抓取 info 資料
                     info = tk.info
                     d_tag = info.get('trailingAnnualDividendRate', 0) or info.get('dividendRate', 0) or 0
                     
-                    # 邏輯 B: 抓取歷史資料 (dividends)，對 SHV, SGOV 等月配息穩定
+                    # 邏輯 2: 抓取 dividends 歷史資料
                     divs = tk.dividends
                     d_hist = 0
                     if not divs.empty:
+                        # 關鍵：強制抹除時區資訊進行比較
                         divs.index = divs.index.tz_localize(None)
                         one_year_ago = pd.Timestamp.now().normalize() - pd.Timedelta(days=365)
                         d_hist = float(divs[divs.index > one_year_ago].sum())
                     
-                    # 取兩者最大值，確保只要有一邊抓到就不會是 0
+                    # 邏輯 3: 取最大值。這樣股票 (d_tag 有值) 與 債券 (d_hist 有值) 都能顯示
                     div_map[sym] = max(float(d_tag), float(d_hist))
                 except:
                     div_map[sym] = 0
