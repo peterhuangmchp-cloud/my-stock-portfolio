@@ -98,16 +98,27 @@ try:
                     rate = usd_to_twd if row['currency'].upper() == "USD" else 1
                     history_list.append((h_12m * row['shares'] * rate).to_frame(name=sym))
                 
-                # 抓取配息 (過濾過去 365 天)
+                # --- [修正後的配息抓取邏輯] ---
                 try:
-                    divs = tk.dividends
-                    one_year_ago = pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=365)
-                    div_val = float(divs[divs.index > one_year_ago].sum()) if not divs.empty else 0
-                    div_map[sym] = div_val
+                    d_val = 0
+                    # 1. 對於科技股，優先從 info 抓取
+                    info = tk.info
+                    d_val = info.get('trailingAnnualDividendRate', 0) or info.get('dividendRate', 0) or 0
+                    
+                    # 2. 如果為 0 (債券常用)，或是債券標的，則強制加總歷史紀錄
+                    if d_val == 0 or sym in ['SHV', 'SGOV', 'TLT', 'LQD']:
+                        divs = tk.dividends
+                        if not divs.empty:
+                            # 統一去時區化，解決 Offset-naive/aware 衝突
+                            divs.index = divs.index.tz_localize(None)
+                            one_year_ago = pd.Timestamp.now().normalize() - pd.Timedelta(days=365)
+                            d_val = float(divs[divs.index > one_year_ago].sum())
+                    
+                    div_map[sym] = d_val
                 except:
                     div_map[sym] = 0
                 
-                time.sleep(0.05) # 稍微緩衝避開 Rate Limit
+                time.sleep(0.1) # 緩衝避開 Rate Limit
 
         bond_list = ['TLT', 'SHV', 'SGOV', 'LQD']
         def calculate_metrics(row):
@@ -132,7 +143,7 @@ try:
         cols = ['current_price', 'mv_twd', 'profit_twd', 'roi', 'net_div_twd', 'drawdown_52h', 'daily_chg_twd']
         df[cols] = df.apply(calculate_metrics, axis=1)
 
-        # --- 4. 數據統計 (強化轉為標量避免格式化錯誤) ---
+        # --- 4. 數據統計 ---
         total_mv = float(df['mv_twd'].sum())
         total_daily_chg = float(df['daily_chg_twd'].sum())
         total_profit = float(df['profit_twd'].sum())
@@ -162,10 +173,9 @@ try:
         c3.metric("年度預估配息 (稅後)", f"${total_net_div:,.0f}")
         c4.metric("平均月收息 (TWD)", f"${avg_monthly_div:,.0f}")
 
-        # 資產趨勢圖 (修正最新 Pandas 語法)
+        # 資產趨勢圖
         if history_list:
             st.markdown("---")
-            # 使用 .ffill() 取代 fillna(method='ffill')
             history_combined = pd.concat(history_list, axis=1).ffill().fillna(0)
             trend_series = history_combined.sum(axis=1)
             fig = px.area(trend_series, title="資產成長曲線 (TWD)", template="plotly_white")
