@@ -62,7 +62,7 @@ try:
     df = load_data(gsheet_id, main_gid)
     if df is not None:
         usd_to_twd = get_exchange_rate()
-        with st.spinner('📱 正在同步全球行情與配息 (Debug 中)...'):
+        with st.spinner('📱 正在同步全球行情與配息...'):
             price_map, prev_map, div_map, h52_map, history_list = {}, {}, {}, {}, []
             for index, row in df.iterrows():
                 sym = str(row['symbol']).strip()
@@ -78,23 +78,26 @@ try:
                     rate = usd_to_twd if row['currency'].upper() == "USD" else 1
                     history_list.append((h_12m * row['shares'] * rate).to_frame(name=sym))
                 
-                # --- [DEBUG 配息抓取邏輯] ---
+                # --- [修正後的配息抓取邏輯] ---
                 try:
                     sym_clean = sym.upper().strip()
                     info = tk.info
                     d_tag = info.get('trailingAnnualDividendRate', 0) or info.get('dividendRate', 0) or 0
+                    
                     divs = tk.dividends
                     d_hist = 0
                     if not divs.empty:
                         div_history = divs.copy()
                         div_history.index = div_history.index.tz_localize(None)
                         one_year_ago = pd.Timestamp.now().normalize() - pd.Timedelta(days=365)
+                        # 強制加總避免回傳 Series
                         d_hist = float(div_history[div_history.index > one_year_ago].sum())
 
                     if sym_clean in ['SHV', 'SGOV']:
                         with st.expander(f"🔍 Debug 報告: {sym_clean}", expanded=True):
                             st.write(f"Info 數值: `{d_tag}` | 歷史總和: `{d_hist}` | 紀錄筆數: `{len(divs) if not divs.empty else 0}`")
                     
+                    # 邏輯切換
                     div_map[sym] = d_hist if sym_clean in ['SHV', 'SGOV'] and d_hist > 0 else (d_tag or d_hist)
                 except Exception as e:
                     if sym_clean in ['SHV', 'SGOV']: st.error(f"Debug 錯誤 ({sym_clean}): {e}")
