@@ -95,21 +95,22 @@ try:
                     rate = usd_to_twd if row['currency'].upper() == "USD" else 1
                     history_list.append((h_12m * row['shares'] * rate).to_frame(name=sym))
                 
-                # --- [核心修補：聯集策略] ---
+                # --- [關鍵修復：聯集抓取邏輯] ---
                 try:
-                    # 1. 抓取 Info (科技股最準)
-                    info_div = tk.info.get('trailingAnnualDividendRate', 0) or tk.info.get('dividendRate', 0) or 0
+                    # 邏輯 A: 抓取標籤資料 (info)，對 AVGO, NVDA 穩定
+                    info = tk.info
+                    d_tag = info.get('trailingAnnualDividendRate', 0) or info.get('dividendRate', 0) or 0
                     
-                    # 2. 抓取歷史加總 (債券 ETF 唯一解)
+                    # 邏輯 B: 抓取歷史資料 (dividends)，對 SHV, SGOV 等月配息穩定
                     divs = tk.dividends
-                    hist_div = 0
+                    d_hist = 0
                     if not divs.empty:
                         divs.index = divs.index.tz_localize(None)
                         one_year_ago = pd.Timestamp.now().normalize() - pd.Timedelta(days=365)
-                        hist_div = float(divs[divs.index > one_year_ago].sum())
+                        d_hist = float(divs[divs.index > one_year_ago].sum())
                     
-                    # 3. 取兩者較大值 (避免任一接口回傳 0 的問題)
-                    div_map[sym] = max(float(info_div), float(hist_div))
+                    # 取兩者最大值，確保只要有一邊抓到就不會是 0
+                    div_map[sym] = max(float(d_tag), float(d_hist))
                 except:
                     div_map[sym] = 0
                 
