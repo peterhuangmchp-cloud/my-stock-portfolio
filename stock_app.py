@@ -6,17 +6,23 @@ import io
 import requests
 import time
 
-# --- 1. 網頁基本設定 ---
+# --- 1. 網頁基本設定 (行動端優化) ---
 st.set_page_config(
-    page_title="投資儀表板 (DEBUGING SHV/SGOV)", 
+    page_title="私人投資儀表板", 
     layout="wide", 
     page_icon="💰",
     initial_sidebar_state="collapsed"
 )
 
-st.markdown("""<style>.stMetric { background-color: #f0f2f6; padding: 10px; border-radius: 10px; }</style>""", unsafe_allow_html=True)
+# 自定義 CSS
+st.markdown("""
+    <style>
+    .main { padding-top: 1rem; }
+    .stMetric { background-color: #f0f2f6; padding: 10px; border-radius: 10px; }
+    </style>
+    """, unsafe_allow_html=True)
 
-# --- 2. 🔐 密碼與數據讀取 ---
+# --- 2. 🔐 密碼保護與數據讀取 ---
 def check_password():
     if "authenticated" not in st.session_state:
         st.session_state["authenticated"] = False
@@ -27,30 +33,37 @@ def check_password():
             if pwd_input == st.secrets.get("APP_PASSWORD"):
                 st.session_state["authenticated"] = True
                 st.rerun()
-            else: st.error("❌ 密碼錯誤")
+            else:
+                st.error("❌ 密碼錯誤")
         st.stop()
 
 check_password()
-gsheet_id, main_gid = st.secrets.get("GSHEET_ID"), st.secrets.get("MAIN_GID")
+
+gsheet_id = st.secrets.get("GSHEET_ID")
+main_gid = st.secrets.get("MAIN_GID")
 
 @st.cache_data(ttl=600)
 def load_data(sheet_id, gid):
     url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
+        response = requests.get(url, headers=headers)
         if response.status_code == 200:
             data = pd.read_csv(io.StringIO(response.text))
             data.columns = data.columns.str.strip().str.lower()
             return data.dropna(subset=['symbol'])
         return None
-    except: return None
+    except:
+        return None
 
 @st.cache_data(ttl=3600)
 def get_exchange_rate():
     try:
         ticker = yf.Ticker("TWD=X")
-        return float(ticker.history(period="1d")['Close'].iloc[-1])
-    except: return 32.5 
+        val = ticker.history(period="1d")['Close'].iloc[-1]
+        return float(val)
+    except:
+        return 32.5 
 
 def color_roi(val):
     if isinstance(val, (int, float)):
@@ -62,8 +75,10 @@ try:
     df = load_data(gsheet_id, main_gid)
     if df is not None:
         usd_to_twd = get_exchange_rate()
+        
         with st.spinner('📱 正在同步全球行情與配息...'):
             price_map, prev_map, div_map, h52_map, history_list = {}, {}, {}, {}, []
+            
             for index, row in df.iterrows():
                 sym = str(row['symbol']).strip()
                 tk = yf.Ticker(sym)
@@ -80,36 +95,20 @@ try:
                     rate = usd_to_twd if row['currency'].upper() == "USD" else 1
                     history_list.append((h_12m * row['shares'] * rate).to_frame(name=sym))
                 
-                # --- [DEBUG 核心邏輯區塊] ---
+                # --- [配息抓取優化邏輯] ---
                 try:
                     sym_clean = sym.upper().strip()
                     info = tk.info
-                    d_info = info.get('trailingAnnualDividendRate', 0) or info.get('dividendRate', 0) or 0
+                    d_val = info.get('trailingAnnualDividendRate', 0) or info.get('dividendRate', 0) or 0
                     
-                    divs = tk.dividends
-                    d_hist = 0.0
+                    # 針對債券 ETF 或 info 失效的標的，改用歷史紀錄最後 12 筆加總
+                    if d_val == 0 or sym_clean in ['SHV', 'SGOV', 'TLT', 'LQD']:
+                        divs = tk.dividends
+                        if not divs.empty:
+                            d_val = float(divs.tail(12).values.sum())
                     
-                    if not divs.empty:
-                        # 使用 .values.sum() 確保絕對不回傳 Series 物件
-                        d_hist = float(divs.tail(12).values.sum())
-
-                    # SHV/SGOV 的 Debug 報告
-                    if sym_clean in ['SHV', 'SGOV']:
-                        with st.expander(f"🔍 DEBUG: {sym_clean}", expanded=True):
-                            st.write(f"1. Info 抓取值: `{d_info}`")
-                            st.write(f"2. Dividends 最後 12 筆加總: `{d_hist}`")
-                            st.write(f"3. Dividends 全部原始資料:")
-                            st.write(divs.tail(5)) # 顯示最後 5 筆看結構
-                    
-                    # 邏輯決策
-                    if sym_clean in ['SHV', 'SGOV']:
-                        div_map[sym] = d_hist if d_hist > 0 else d_info
-                    else:
-                        div_map[sym] = d_info if d_info > 0 else d_hist
-                        
-                except Exception as e:
-                    if sym.upper().strip() in ['SHV', 'SGOV']:
-                        st.error(f"❌ {sym} 錯誤: {e}")
+                    div_map[sym] = d_val
+                except:
                     div_map[sym] = 0
                 
                 time.sleep(0.05)
@@ -128,8 +127,8 @@ try:
             drawdown_52h = float(((cp - h52) / h52 * 100) if h52 > 0 else 0)
             daily_chg = float((cp - pp) * row['shares'] * rate)
             
-            # 使用正確的 key 取得配息
             div_ps = div_map.get(sym_key, 0)
+            # 債券不扣 30% 稅，其餘美股扣稅
             tax = 0.7 if row['currency'].upper() == "USD" and sym_key.upper() not in bond_list else 1.0
             net_div = float(div_ps * row['shares'] * tax * rate)
             
@@ -138,29 +137,36 @@ try:
         cols = ['current_price', 'mv_twd', 'profit_twd', 'roi', 'net_div_twd', 'drawdown_52h', 'daily_chg_twd']
         df[cols] = df.apply(calculate_metrics, axis=1)
 
-        # --- 4. 統計顯示 ---
-        total_mv = df['mv_twd'].sum()
-        total_daily_chg = df['daily_chg_twd'].sum()
-        total_profit = df['profit_twd'].sum()
-        total_net_div = df['net_div_twd'].sum()
+        # --- 4. 數據統計 ---
+        total_mv = float(df['mv_twd'].sum())
+        total_daily_chg = float(df['daily_chg_twd'].sum())
+        total_profit = float(df['profit_twd'].sum())
+        total_net_div = float(df['net_div_twd'].sum())
         
+        # --- 5. 介面呈現 ---
         st.subheader("💰 財務快照")
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("總市值 (TWD)", f"${total_mv:,.0f}", f"${total_daily_chg:,.0f}")
-        c2.metric("累計損益 (TWD)", f"${total_profit:,.0f}")
+        c1.metric("總市值 (TWD)", f"${total_mv:,.0f}", f"${total_daily_chg:,.0f} (今日)")
+        c2.metric("總損益 (TWD)", f"${total_profit:,.0f}")
         c3.metric("年度預估配息 (稅後)", f"${total_net_div:,.0f}")
         c4.metric("平均月收息 (TWD)", f"${total_net_div/12:,.0f}")
 
-        # 下方表格與圖表保持不變...
         if history_list:
+            st.markdown("---")
             trend = pd.concat(history_list, axis=1).ffill().fillna(0).sum(axis=1)
-            st.plotly_chart(px.area(trend, title="資產成長曲線 (TWD)", template="plotly_white"), use_container_width=True)
+            fig = px.area(trend, title="資產成長曲線 (TWD)", template="plotly_white")
+            fig.update_layout(height=400, margin=dict(l=10, r=10, t=40, b=10))
+            st.plotly_chart(fig, use_container_width=True)
 
         tab1, tab2, tab3 = st.tabs(["📑 市值損益", "📈 月變動紀錄", "💵 詳細配息清單"])
         with tab1:
             st.dataframe(df[['name', 'roi', 'mv_twd', 'profit_twd', 'drawdown_52h']].style.format({
                 'mv_twd': '{:,.0f}', 'profit_twd': '{:,.0f}', 'roi': '{:.2f}%', 'drawdown_52h': '{:.2f}%'
             }).map(color_roi, subset=['roi']), use_container_width=True)
+        with tab2:
+            m_df = trend.resample('ME').last().sort_index(ascending=False).to_frame(name='月終市值')
+            m_df['月變動額'] = m_df['月終市值'].diff(periods=-1)
+            st.dataframe(m_df.style.format('{:,.0f}').map(color_roi, subset=['月變動額']), use_container_width=True)
         with tab3:
             st.dataframe(df[['name', 'symbol', 'shares', 'net_div_twd']].style.format({
                 'shares': '{:,.0f}', 'net_div_twd': '{:,.0f}'
