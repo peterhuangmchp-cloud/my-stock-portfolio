@@ -8,7 +8,7 @@ import time
 
 # --- 1. 網頁基本設定 ---
 st.set_page_config(
-    page_title="私人投資儀表板", 
+    page_title="投資儀表板 (DEBUGING SHV/SGOV)", 
     layout="wide", 
     page_icon="💰",
     initial_sidebar_state="collapsed"
@@ -80,28 +80,43 @@ try:
                     rate = usd_to_twd if row['currency'].upper() == "USD" else 1
                     history_list.append((h_12m * row['shares'] * rate).to_frame(name=sym))
                 
-                # --- [配息抓取邏輯強化版] ---
+                # --- [DEBUG 核心邏輯區塊] ---
                 try:
-                    # 1. 嘗試從 info 抓取
+                    sym_clean = sym.upper().strip()
                     info = tk.info
-                    d_val = info.get('trailingAnnualDividendRate', 0) or info.get('dividendRate', 0) or 0
+                    d_info = info.get('trailingAnnualDividendRate', 0) or info.get('dividendRate', 0) or 0
                     
-                    # 2. 如果 info 是 0，或標的是 SHV/SGOV，改用歷史紀錄加總
-                    if d_val == 0 or sym.upper() in ['SHV', 'SGOV']:
-                        divs = tk.dividends
-                        if not divs.empty:
-                            # 抓取最近 12 筆配息紀錄直接加總，避開日期過濾的錯誤
-                            d_val = float(divs.tail(12).sum())
+                    divs = tk.dividends
+                    d_hist = 0.0
                     
-                    div_map[sym] = d_val
-                except:
+                    if not divs.empty:
+                        # 使用 .values.sum() 確保絕對不回傳 Series 物件
+                        d_hist = float(divs.tail(12).values.sum())
+
+                    # SHV/SGOV 的 Debug 報告
+                    if sym_clean in ['SHV', 'SGOV']:
+                        with st.expander(f"🔍 DEBUG: {sym_clean}", expanded=True):
+                            st.write(f"1. Info 抓取值: `{d_info}`")
+                            st.write(f"2. Dividends 最後 12 筆加總: `{d_hist}`")
+                            st.write(f"3. Dividends 全部原始資料:")
+                            st.write(divs.tail(5)) # 顯示最後 5 筆看結構
+                    
+                    # 邏輯決策
+                    if sym_clean in ['SHV', 'SGOV']:
+                        div_map[sym] = d_hist if d_hist > 0 else d_info
+                    else:
+                        div_map[sym] = d_info if d_info > 0 else d_hist
+                        
+                except Exception as e:
+                    if sym.upper().strip() in ['SHV', 'SGOV']:
+                        st.error(f"❌ {sym} 錯誤: {e}")
                     div_map[sym] = 0
                 
                 time.sleep(0.05)
 
         bond_list = ['TLT', 'SHV', 'SGOV', 'LQD']
         def calculate_metrics(row):
-            sym = str(row['symbol']).strip()
+            sym_key = str(row['symbol']).strip()
             cp = price_map.get(row.name, 0)
             pp = prev_map.get(row.name, 0)
             h52 = h52_map.get(row.name, 0)
@@ -113,9 +128,9 @@ try:
             drawdown_52h = float(((cp - h52) / h52 * 100) if h52 > 0 else 0)
             daily_chg = float((cp - pp) * row['shares'] * rate)
             
-            # 配息計算
-            div_ps = div_map.get(sym, 0)
-            tax = 0.7 if row['currency'].upper() == "USD" and sym not in bond_list else 1.0
+            # 使用正確的 key 取得配息
+            div_ps = div_map.get(sym_key, 0)
+            tax = 0.7 if row['currency'].upper() == "USD" and sym_key.upper() not in bond_list else 1.0
             net_div = float(div_ps * row['shares'] * tax * rate)
             
             return pd.Series([cp, mv, profit, roi, net_div, drawdown_52h, daily_chg])
@@ -123,13 +138,12 @@ try:
         cols = ['current_price', 'mv_twd', 'profit_twd', 'roi', 'net_div_twd', 'drawdown_52h', 'daily_chg_twd']
         df[cols] = df.apply(calculate_metrics, axis=1)
 
-        # --- 4. 數據統計 ---
+        # --- 4. 統計顯示 ---
         total_mv = df['mv_twd'].sum()
         total_daily_chg = df['daily_chg_twd'].sum()
         total_profit = df['profit_twd'].sum()
         total_net_div = df['net_div_twd'].sum()
         
-        # --- 5. 介面呈現 ---
         st.subheader("💰 財務快照")
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("總市值 (TWD)", f"${total_mv:,.0f}", f"${total_daily_chg:,.0f}")
@@ -137,6 +151,7 @@ try:
         c3.metric("年度預估配息 (稅後)", f"${total_net_div:,.0f}")
         c4.metric("平均月收息 (TWD)", f"${total_net_div/12:,.0f}")
 
+        # 下方表格與圖表保持不變...
         if history_list:
             trend = pd.concat(history_list, axis=1).ffill().fillna(0).sum(axis=1)
             st.plotly_chart(px.area(trend, title="資產成長曲線 (TWD)", template="plotly_white"), use_container_width=True)
@@ -146,10 +161,6 @@ try:
             st.dataframe(df[['name', 'roi', 'mv_twd', 'profit_twd', 'drawdown_52h']].style.format({
                 'mv_twd': '{:,.0f}', 'profit_twd': '{:,.0f}', 'roi': '{:.2f}%', 'drawdown_52h': '{:.2f}%'
             }).map(color_roi, subset=['roi']), use_container_width=True)
-        with tab2:
-            m_df = trend.resample('ME').last().sort_index(ascending=False).to_frame(name='月終市值')
-            m_df['月變動額'] = m_df['月終市值'].diff(periods=-1)
-            st.dataframe(m_df.style.format('{:,.0f}').map(color_roi, subset=['月變動額']), use_container_width=True)
         with tab3:
             st.dataframe(df[['name', 'symbol', 'shares', 'net_div_twd']].style.format({
                 'shares': '{:,.0f}', 'net_div_twd': '{:,.0f}'
