@@ -5,6 +5,7 @@ import plotly.express as px
 import io
 import requests
 import time
+import numpy as np
 
 # --- 1. 網頁基本設定 (行動端優化) ---
 st.set_page_config(
@@ -76,11 +77,22 @@ try:
     if df is not None:
         usd_to_twd = get_exchange_rate()
         
+        # 強制轉換基礎欄位格式，避免文字干擾計算
+        df['shares'] = pd.to_numeric(df['shares'], errors='coerce').fillna(0)
+        df['cost'] = pd.to_numeric(df['cost'], errors='coerce').fillna(0)
+        
         with st.spinner('📱 正在同步全球行情與配息...'):
             price_map, prev_map, div_map, h52_map, history_list = {}, {}, {}, {}, []
             
             for index, row in df.iterrows():
                 sym = str(row['symbol']).strip()
+                
+                # 特殊處理現金標的，不跑 yfinance 避免耗時與報錯
+                if sym.upper() == 'CASH':
+                    price_map[index], prev_map[index], h52_map[index] = 1.0, 1.0, 1.0
+                    div_map[sym] = 0.0
+                    continue
+                
                 tk = yf.Ticker(sym)
                 hist = tk.history(period="1y")
                 
@@ -92,16 +104,19 @@ try:
                     
                     h_12m = hist['Close'].copy()
                     h_12m.index = pd.to_datetime(h_12m.index).tz_localize(None).normalize()
-                    rate = usd_to_twd if row['currency'].upper() == "USD" else 1
+                    rate = usd_to_twd if str(row['currency']).upper() == "USD" else 1
                     history_list.append((h_12m * row['shares'] * rate).to_frame(name=sym))
+                else:
+                    # 沒抓到歷史資料的預設防禦
+                    price_map[index], prev_map[index], h52_map[index] = 0.0, 0.0, 0.0
                 
-                # --- [配息抓取優化邏輯] ---
+                # --- 配息抓取邏輯 ---
                 try:
                     sym_clean = sym.upper().strip()
                     info = tk.info
                     d_val = info.get('trailingAnnualDividendRate', 0) or info.get('dividendRate', 0) or 0
                     
-                    # 針對債券 ETF 或 info 失效的標的，改用歷史紀錄最後 12 筆加總
+                    # 針對債券 ETF，改用歷史紀錄最後 12 筆加總
                     if d_val == 0 or sym_clean in ['SHV', 'SGOV', 'TLT', 'LQD']:
                         divs = tk.dividends
                         if not divs.empty:
@@ -114,22 +129,31 @@ try:
                 time.sleep(0.05)
 
         bond_list = ['TLT', 'SHV', 'SGOV', 'LQD']
+        
         def calculate_metrics(row):
             sym_key = str(row['symbol']).strip()
             cp = price_map.get(row.name, 0)
             pp = prev_map.get(row.name, 0)
             h52 = h52_map.get(row.name, 0)
-            rate = usd_to_twd if row['currency'].upper() == "USD" else 1
+            rate = usd_to_twd if str(row['currency']).upper() == "USD" else 1
+            
+            # 特殊處理現金
+            if sym_key.upper() == 'CASH':
+                mv = float(row['shares']) # 現金的 shares 即為本金金額
+                return pd.Series([1.0, mv, 0.0, 0.0, 0.0, 0.0, 0.0])
             
             mv = float(cp * row['shares'] * rate)
-            profit = float(mv - (row['cost'] * row['shares'] * rate))
-            roi = float((profit / (row['cost'] * row['shares'] * rate) * 100) if row['cost'] > 0 else 0)
-            drawdown_52h = float(((cp - h52) / h52 * 100) if h52 > 0 else 0)
+            total_cost = float(row['cost'] * row['shares'] * rate)
+            
+            profit = float(mv - total_cost)
+            
+            # 🌟 核心修正：加入分母為 0 的嚴格防禦
+            roi = float((profit / total_cost * 100) if total_cost > 0 else 0.0)
+            drawdown_52h = float(((cp - h52) / h52 * 100) if h52 > 0 else 0.0)
             daily_chg = float((cp - pp) * row['shares'] * rate)
             
             div_ps = div_map.get(sym_key, 0)
-            # 債券不扣 30% 稅，其餘美股扣稅
-            tax = 0.7 if row['currency'].upper() == "USD" and sym_key.upper() not in bond_list else 1.0
+            tax = 0.7 if str(row['currency']).upper() == "USD" and sym_key.upper() not in bond_list else 1.0
             net_div = float(div_ps * row['shares'] * tax * rate)
             
             return pd.Series([cp, mv, profit, roi, net_div, drawdown_52h, daily_chg])
@@ -163,10 +187,16 @@ try:
             st.dataframe(df[['name', 'roi', 'mv_twd', 'profit_twd', 'drawdown_52h']].style.format({
                 'mv_twd': '{:,.0f}', 'profit_twd': '{:,.0f}', 'roi': '{:.2f}%', 'drawdown_52h': '{:.2f}%'
             }).map(color_roi, subset=['roi']), use_container_width=True)
+            
         with tab2:
-            m_df = trend.resample('ME').last().sort_index(ascending=False).to_frame(name='月終市值')
-            m_df['月變動額'] = m_df['月終市值'].diff(periods=-1)
-            st.dataframe(m_df.style.format('{:,.0f}').map(color_roi, subset=['月變動額']), use_container_width=True)
+            if not trend.empty:
+                # 兼容較新版本 Pandas 的 Resample 規則
+                m_df = trend.resample('ME').last().sort_index(ascending=False).to_frame(name='月終市值')
+                m_df['月變動額'] = m_df['月終市值'].diff(periods=-1).fillna(0)
+                st.dataframe(m_df.style.format('{:,.0f}').map(color_roi, subset=['月變動額']), use_container_width=True)
+            else:
+                st.info("尚無歷史趨勢數據可供計算月變動。")
+                
         with tab3:
             st.dataframe(df[['name', 'symbol', 'shares', 'net_div_twd']].style.format({
                 'shares': '{:,.0f}', 'net_div_twd': '{:,.0f}'
