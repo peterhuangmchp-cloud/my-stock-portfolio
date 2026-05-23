@@ -107,7 +107,6 @@ try:
                     rate = usd_to_twd if str(row['currency']).upper() == "USD" else 1
                     history_list.append((h_12m * row['shares'] * rate).to_frame(name=sym))
                 else:
-                    # 沒抓到歷史資料的預設防禦
                     price_map[index], prev_map[index], h52_map[index] = 0.0, 0.0, 0.0
                 
                 # --- 配息抓取邏輯 ---
@@ -139,15 +138,13 @@ try:
             
             # 特殊處理現金
             if sym_key.upper() == 'CASH':
-                mv = float(row['shares']) # 現金的 shares 即為本金金額
+                mv = float(row['shares'])
                 return pd.Series([1.0, mv, 0.0, 0.0, 0.0, 0.0, 0.0])
             
             mv = float(cp * row['shares'] * rate)
             total_cost = float(row['cost'] * row['shares'] * rate)
-            
             profit = float(mv - total_cost)
             
-            # 🌟 核心修正：加入分母為 0 的嚴格防禦
             roi = float((profit / total_cost * 100) if total_cost > 0 else 0.0)
             drawdown_52h = float(((cp - h52) / h52 * 100) if h52 > 0 else 0.0)
             daily_chg = float((cp - pp) * row['shares'] * rate)
@@ -169,6 +166,19 @@ try:
         
         # --- 5. 介面呈現 ---
         st.subheader("💰 財務快照")
+        
+        # 🌟 【新增功能】排版優化：手動強力同步按鈕
+        col_sync1, col_sync2 = st.columns([1, 4])
+        with col_sync1:
+            if st.button("🔄 同步最新數據", use_container_width=True):
+                st.cache_data.clear()  # 清除全頁面快取
+                st.toast("已清除暫存，正在重啟網頁載入最新 Google Sheet...")
+                time.sleep(0.6)
+                st.rerun()             # 強制網頁重新載入
+                
+        st.write("") # 留白保持畫面美觀
+        
+        # 數據快照指標卡
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("總市值 (TWD)", f"${total_mv:,.0f}", f"${total_daily_chg:,.0f} (今日)")
         c2.metric("總損益 (TWD)", f"${total_profit:,.0f}")
@@ -178,7 +188,7 @@ try:
         if history_list:
             st.markdown("---")
             trend = pd.concat(history_list, axis=1).ffill().fillna(0).sum(axis=1)
-            fig = px.area(trend, title="資產成長曲線 (TWD)", template="plotly_white")
+            fig = px.area(trend, title="資Asset增長曲線 (TWD)", template="plotly_white")
             fig.update_layout(height=400, margin=dict(l=10, r=10, t=40, b=10))
             st.plotly_chart(fig, use_container_width=True)
 
@@ -190,7 +200,6 @@ try:
             
         with tab2:
             if not trend.empty:
-                # 兼容較新版本 Pandas 的 Resample 規則
                 m_df = trend.resample('ME').last().sort_index(ascending=False).to_frame(name='月終市值')
                 m_df['月變動額'] = m_df['月終市值'].diff(periods=-1).fillna(0)
                 st.dataframe(m_df.style.format('{:,.0f}').map(color_roi, subset=['月變動額']), use_container_width=True)
